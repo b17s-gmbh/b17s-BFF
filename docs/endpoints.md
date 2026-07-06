@@ -1,6 +1,6 @@
 # Endpoint Configuration
 
-The BFF framework uses a fluent builder pattern for configuring endpoints. The vocabulary documented here (`FromGet/Post/...`, `FromAny`, `ToGet/Post/...`, `ToAny`, `.When(...)`, `RequireAuth/AllowAnonymous`, `WithBackendAuth/WithTokenExchange/WithRetries`, `Build()`) is shared between `MapTransformer<...>()` and `MapPassThrough<T>()` - the examples below use `MapTransformer` but apply to both. The one exception is `ToBackends(...)`, which is only available on `MapTransformer` (multi-backend aggregation is by definition not a pass-through concern). `MapRawForward()` is a separate streaming builder with its own - smaller - surface (it shares the `FromGet/...` and `ToGet/...` verb sugar); see [Raw Forwarding](raw-forwarding.md).
+The BFF framework uses a fluent builder pattern for configuring endpoints. The vocabulary documented here (`FromGet/Post/...`, `FromAny`, `ToGet/Post/...`, `ToAny`, `.When(...)`, `RequireAuth/AllowAnonymous`, `WithBackendAuth/WithTokenExchange/WithRetries`, `AllowForwardingHeaders(...)`, `Build()`) is shared between `MapTransformer<...>()` and `MapPassThrough<T>()` - the examples below use `MapTransformer` but apply to both. The one exception is `ToBackends(...)`, which is only available on `MapTransformer` (multi-backend aggregation is by definition not a pass-through concern). `MapRawForward()` is a separate streaming builder with its own - smaller - surface (it shares the `FromGet/...` and `ToGet/...` verb sugar); see [Raw Forwarding](raw-forwarding.md).
 
 ## Basic Endpoint Registration
 
@@ -152,6 +152,46 @@ app.MapTransformer<ProductsTransformer, ProductsResponse>()
   same precedence with no guard to break the tie — i.e. two *unguarded* endpoints, or two `.When()`s
   that are true at once. A single unguarded fallback alongside guarded variants is fine
 - Keep predicates simple for performance - they run on every matching request
+
+## Forwarding Client Request Headers
+
+A typed endpoint (`MapTransformer` / `MapPassThrough`) builds its backend request from scratch, so
+by default **no** client request headers reach the backend. `AllowForwardingHeaders()` opts
+specific ones in without writing a custom transformer:
+
+```csharp
+app.MapPassThrough<ProductsResponse>()
+    .FromGet("/api/products")
+    .ToGet("https://products-api.internal/products")
+    .AllowForwardingHeaders(["Accept-Language", "X-Request-Id"])
+    .Build();
+
+// Scope forwarding to specific backend hosts (matched per request against the
+// interpolated backend URL, since route values can steer the host):
+app.MapPassThrough<ProductsResponse>()
+    .FromGet("/api/products")
+    .ToGet("https://products-api.internal/products")
+    .AllowForwardingHeaders(["X-Request-Id"], destinationHosts: ["products-api.internal"])
+    .Build();
+```
+
+**Rules:**
+- Header names are case-insensitive; multi-value headers are folded with `,`.
+- Hop-by-hop headers (`Connection`, `Host`, ...), framing headers (`Content-Length`,
+  `Transfer-Encoding`) and entity headers describing the request body (`Content-Type`,
+  `Content-Encoding`, ...) are rejected at configuration time - the typed pipeline serializes its
+  own backend body. Use [`MapRawForward()`](raw-forwarding.md) to relay a body verbatim.
+- Listing a sensitive header (`Cookie`, `Authorization`, `X-Forwarded-*`) is an explicit opt-in,
+  mirroring raw-forward's allow-list. Forwarding `Authorization` while a backend-auth policy
+  (`WithBackendAuth`/`WithTokenExchange`) would overwrite it fails at `Build()` instead of
+  silently dropping the client's value.
+- `AllowForwardingHeaders()` applies to the single backend configured via `ToBackend/ToGet/...`;
+  combining it with only `ToBackends(...)` fails at `Build()` - named multi-backend legs build
+  their own requests inside the transformer, where you can set `BackendRequest.Headers` directly.
+
+Note the different default on `MapRawForward()`: raw forwarding is a proxy and forwards most
+headers already, so its `AllowForwardingHeaders()` opts *sensitive* headers back in. Here the
+default is "forward nothing" and the method opts headers in at all.
 
 ## Multi-Backend Endpoints
 

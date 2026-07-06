@@ -404,6 +404,26 @@ public sealed class TransformerEndpointBuilderFluentTests
     }
 
     [Fact]
+    public void Build_Throws_WhenAllowForwardingHeadersUsed_WithoutSingleBackend()
+    {
+        // AllowForwardingHeaders() rides on the single-backend BackendRequest the endpoint
+        // handler builds. Named backend legs construct their own requests inside the
+        // transformer, where the allow-list is invisible - that must fail the boot instead of
+        // silently forwarding nothing.
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var app = WebApplication.CreateBuilder().Build();
+            app.MapTransformer<RecordingTransformer, EchoResponse>()
+                .FromGet("/api/x")
+                .ToBackends(NamedBackendEndpoint.FromTuple("Data", "GET", "https://backend.test/data"))
+                .AllowForwardingHeaders(["X-Request-Id"])
+                .AllowAnonymous()
+                .Build();
+        });
+        Assert.Contains("AllowForwardingHeaders", ex.Message);
+    }
+
+    [Fact]
     public void ToBackends_AppliesBackendAuthFallback_RegardlessOfCallOrder()
     {
         // The WithBackendAuth() default must reach named backends whether it's chained before or
