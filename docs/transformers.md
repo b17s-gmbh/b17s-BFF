@@ -136,7 +136,7 @@ The `ToBackends(configure => ...)` overload takes a builder whose `ToGet/ToPost/
 
 Available per-backend modifiers: `.WithAuth(policy)`, `.WithUserToken()`, `.WithTokenExchange(audience)`, `.WithTimeout(...)`, `.WithRetries(...)`. Use `.ToBackend(method, name, url)` for verbs without a shorthand (e.g. `HEAD`). `.WithRetries(n)` is per-backend - each backend retries the count it declares, capped at the app-wide `PortaCore:MaxRetryAttempts` ceiling (effective count `min(n, ceiling)`).
 
-The older array form of `ToBackends(...)` still works if you prefer to build `NamedBackendEndpoint` values yourself - via the object initializer or the `(name, method, url).WithAuth(...)` tuple extensions (see [Endpoints](endpoints.md#multi-backend-endpoints)):
+`ToBackends(...)` also accepts `NamedBackendEndpoint` values directly - the fluent builder above is sugar over this overload. Use it when you build the endpoints yourself, e.g. programmatically from configuration or a loop, via the object initializer or the `(name, method, url).WithAuth(...)` tuple extensions (see [Endpoints](endpoints.md#multi-backend-endpoints)):
 
 ```csharp
 .ToBackends(

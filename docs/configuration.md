@@ -164,9 +164,9 @@ Custom section name:
 builder.Services.AddPortaAuthentication(builder.Configuration, configSectionName: "MyAuth");
 ```
 
-**Section name duality - `SessionAuthentication` vs `OidcAuth`.** `AddPortaAuthentication(IConfiguration)` defaults to the `"SessionAuthentication"` section and binds it onto `SessionAuthenticationConfiguration`. The `AddPortaOidcAuth(IConfiguration)` alias defaults to `"OidcAuth"` (the `OidcAuthOptions.SectionName` constant) and binds the same shape onto `OidcAuthOptions : SessionAuthenticationConfiguration`. Pick one section name in your `appsettings.json` and call the matching overload; the two are interchangeable, but the BFF will not read both. New code should prefer `AddPortaAuthentication` with the `SessionAuthentication` section.
+**Section name duality - `SessionAuthentication` vs `OidcAuth`.** `AddPortaAuthentication(IConfiguration)` defaults to the `"SessionAuthentication"` section and binds it onto `SessionAuthenticationConfiguration`. The `AddPortaOidcAuth(IConfiguration)` counterpart defaults to `"OidcAuth"` (the `OidcAuthOptions.SectionName` constant) and binds the same shape onto `OidcAuthOptions : SessionAuthenticationConfiguration`. Pick one section name in your `appsettings.json` and call the matching overload; the two are interchangeable, but the BFF will not read both. New code should prefer `AddPortaAuthentication` with the `SessionAuthentication` section.
 
-**Legacy alias.** `AddPortaOidcAuth` (taking either `Action<OidcAuthOptions>` or `IConfiguration`) still works and forwards to `AddPortaAuthentication`. New code should call `AddPortaAuthentication` directly.
+**Alternate entry point.** `AddPortaOidcAuth` (taking either `Action<OidcAuthOptions>` or `IConfiguration`) binds the `OidcAuth` section and delegates to `AddPortaAuthentication`. Both are fully supported; prefer `AddPortaAuthentication` with the `SessionAuthentication` section for new code, for consistency with the rest of the docs.
 
 ### Token refresh resilience - `SessionAuthentication.Resilience`
 

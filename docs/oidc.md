@@ -22,7 +22,8 @@ GET /signin-oidc →  framework handler:
 POST /bff/logout →  SignOutAsync(Cookie + OIDC schemes)
                     ├─ b17s.Porta: revokes refresh token at IdP (RFC 7009)
                     └─ framework redirects to IdP end-session endpoint
-                    (POST required - GET would be CSRF-able under SameSite=Lax)
+                    (POST required - a GET would be CSRF-able if the cookie
+                     is relaxed to SameSite=Lax)
 ```
 
 ## Service registration
@@ -48,7 +49,7 @@ builder.Services.AddPortaAuthentication(builder.Configuration);
     "SessionTimeoutInMin": 60,
     "Cookie": {
       "SecurePolicy": "Always",
-      "SameSite": "Lax",
+      "SameSite": "Strict",
       "ExpireTimeSpanMinutes": 60,
       "SlidingExpiration": false
     },
@@ -135,7 +136,7 @@ Scope and PKCE come from `SessionAuthentication` config; there are no `OidcLogin
 
 Thin shim: validates `redirect_uri`, optionally revokes the refresh token at the IdP, then triggers the framework's sign-out flow.
 
-**HTTP method:** the endpoint only accepts `POST` and returns `405 Method Not Allowed` with `Allow: POST` otherwise. This blocks CSRF logout via `<img src="…/bff/logout">` - under the default `SameSite=Lax` the auth cookie attaches to top-level GETs, and global logout would then revoke the user's refresh token at the IdP as an attacker-triggered side effect.
+**HTTP method:** the endpoint only accepts `POST` and returns `405 Method Not Allowed` with `Allow: POST` otherwise. This blocks CSRF logout via `<img src="…/bff/logout">` - Porta defaults the auth cookie to `SameSite=Strict`, but if an operator relaxes it to `Lax` the cookie attaches to top-level GETs, and global logout would then revoke the user's refresh token at the IdP as an attacker-triggered side effect.
 
 **Antiforgery:** by default the endpoint also requires a valid ASP.NET antiforgery token on the POST. This is defense-in-depth on top of the method gate: if an operator later flips the auth cookie to `SameSite=None` (cross-site embedded scenarios), a cross-origin POST would attach the cookie and trigger logout + IdP-side revocation as a side effect. The antiforgery token closes that window. See [Antiforgery for browser callers](#antiforgery-for-browser-callers) below.
 

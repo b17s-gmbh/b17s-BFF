@@ -156,7 +156,7 @@ app.MapRawForward<SecureFileTransformer>()
 
 | Method | Description |
 |--------|-------------|
-| `[RequiresAuthentication]` (class attribute) | Require auth on the endpoint (default: anonymous). Read at endpoint-build time without instantiating the transformer, so it is safe with scoped or `HttpContext`-bound dependencies. |
+| `[RequiresAuthentication]` (class attribute) | Require auth on the endpoint regardless of configuration. Absent the attribute (and any explicit `.RequireAuth()`/`.AllowAnonymous()`), the endpoint follows `PortaCore:RequireAuthorizationByDefault`, which is `true` by default - so raw-forward endpoints require authentication unless you opt out with `.AllowAnonymous()`. Read at endpoint-build time without instantiating the transformer, so it is safe with scoped or `HttpContext`-bound dependencies. |
 | `ModifyRequest()` | Add headers, modify URL before sending |
 | `ModifyResponseHeaders()` | Strip/add headers before returning |
 

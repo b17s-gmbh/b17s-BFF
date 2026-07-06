@@ -24,7 +24,7 @@ The whole-pipeline request instrumentation in the last row is **opt-in** - the B
 | Refresh-lock cleanup timer | - | `bff.session.lock_cleanup_runs`, `bff.session.stale_locks_cleaned` |
 | Incoming request lifecycle (opt-in, `UsePortaTelemetry()`) | `bff.request` | `bff.request.duration`, `bff.request.size`, `bff.response.size`, `bff.requests.active` |
 
-> Activity names are **fixed category strings** (`bff.transformation`, `bff.raw_forward`, `bff.backend`, …). The literal `bff.transformer.{Name}` / `bff.backend.{ServiceName}` strings you may have seen in older revisions of this doc are *display* shapes only - at runtime each span carries its category as the activity name plus a tag (`bff.transformation.strategy`, `bff.backend.service`) that names the specific transformer or backend. **Search by tag, not by composed activity name.**
+> Activity names are **fixed category strings** (`bff.transformation`, `bff.raw_forward`, `bff.backend`, …) - the specific transformer or backend is never baked into the activity name. Each span carries a tag (`bff.transformation.strategy`, `bff.backend.service`) that names it. Don't look for composed names like `bff.transformer.{Name}` or `bff.backend.{ServiceName}` - **search by tag, not by activity name.**
 
 ### Request-lifecycle instrumentation (`UsePortaTelemetry()`)
 

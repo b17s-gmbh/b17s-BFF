@@ -255,7 +255,7 @@ app.Run();
 
 `SessionKeys.Prefix` should be unique per BFF instance group when multiple BFFs share Redis (otherwise their session keys collide). Inside a single replica set, all replicas use the same prefix.
 
-`Cookie.SameSite` should be `Lax` for the OIDC redirect-back flow to set cookies. `Strict` (the library default) blocks the OIDC callback on some IdPs because the browser treats the post-redirect navigation as cross-site.
+`Cookie.SameSite` should be `Lax` for the OIDC redirect-back flow to set cookies. Browsers only send `Strict` cookies on same-site navigations, so with `Strict` (the library default) a callback redirect arriving from a cross-site IdP never carries the correlation cookie and sign-in fails; a same-site IdP works fine with `Strict`, which is why it remains the default.
 
 ## Failure modes - what each missing piece looks like
 
