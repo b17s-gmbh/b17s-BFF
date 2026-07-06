@@ -4,6 +4,8 @@
 // Brings up, with one command, a full BFF topology against TWO identity providers:
 //
 //   keycloak (container)          - realm + client imported from JSON (zero-touch)
+//   valkey   (container)          - shared distributed cache (Redis-protocol); both BFFs'
+//                                   session/ticket store, so sessions survive across replicas
 //   postgres (container)          - database for Zitadel
 //   zitadel  (container)          - second IdP; first-instance seeded with a service account
 //   zitadel-provisioner (project) - creates Zitadel's OIDC app at runtime, writes its
@@ -194,6 +196,21 @@ var zitadelProvisioner = builder.AddProject<Projects.Demo_ZitadelProvisioner>("z
     .WaitFor(zitadel);
 
 // ---------------------------------------------------------------------------
+// Valkey — the shared distributed cache (Redis-protocol compatible).
+//
+// This is Porta's first HA prerequisite: the auth ticket store, server-side session store,
+// session-metadata index, and refresh lock all live in IDistributedCache. Both BFFs point at
+// this ONE container, so a session minted by one replica is visible to the other — exactly the
+// no-sticky-sessions posture docs/ha-deployment.md describes. Without it each BFF would fall
+// back to its own in-memory cache. Referenced by both BFFs below under the name "cache"; the
+// BFF calls builder.AddRedisDistributedCache("cache") to register the client against it.
+// (Valkey speaks the Redis wire protocol, so the StackExchange.Redis client integration works
+// unchanged.) The demo's /health/ready page surfaces Porta's distributed-cache probe against it.
+// ---------------------------------------------------------------------------
+var cache = builder.AddValkey("cache")
+    .WithUrls(useLoopbackUrls);
+
+// ---------------------------------------------------------------------------
 // Sample downstream API the BFFs forward to.
 // ---------------------------------------------------------------------------
 var backend = builder.AddProject<Projects.Demo_Api>("backend", launchProfileName: null)
@@ -221,6 +238,9 @@ var bffKeycloak = builder.AddProject<Projects.Demo_Bff>("bff-keycloak", launchPr
     .WithEnvironment("OidcAuth__ClientId", "porta-bff")
     .WithEnvironment("OidcAuth__ClientSecret", "porta-bff-secret")
     .WithEnvironment("OidcAuth__Scope", "openid profile email")
+    // Injects the "cache" connection string so AddRedisDistributedCache("cache") resolves it.
+    .WithReference(cache)
+    .WaitFor(cache)
     .WaitFor(keycloak)
     .WaitFor(backend)
     .WithUrls(useLoopbackUrls);
@@ -238,6 +258,9 @@ var bffZitadel = builder.AddProject<Projects.Demo_Bff>("bff-zitadel", launchProf
     .WithEnvironment("BackendService__BasicAuth__Password", BackendBasicPassword)
     .WithEnvironment("OidcAuth__Authority", zitadelAuthority)
     .WithEnvironment("OidcAuth__Scope", "openid profile email")
+    // Injects the "cache" connection string so AddRedisDistributedCache("cache") resolves it.
+    .WithReference(cache)
+    .WaitFor(cache)
     // ClientId/ClientSecret arrive via the provisioner-written file referenced above.
     .WaitForCompletion(zitadelProvisioner)
     .WaitFor(backend)

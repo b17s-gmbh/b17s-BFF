@@ -4,9 +4,25 @@ using b17s.Porta.Transformers;
 
 using Demo.Bff;
 
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();
+
+// ---------------------------------------------------------------------------
+// Distributed cache — Valkey (see AppHost's "cache" resource).
+//
+// Registers IDistributedCache backed by the Valkey container the AppHost injected the "cache"
+// connection string for. This is Porta's HA "thing #1": the auth ticket store, server-side
+// session store, and refresh lock all live in IDistributedCache. A real registration here wins
+// over Porta's in-memory fallback (order relative to AddPortaOidcAuth does not matter), so both
+// BFF instances share one session store and the /health/ready page's distributed-cache probe
+// reports against real Valkey. Valkey speaks the Redis wire protocol, so the StackExchange.Redis
+// client integration connects to it unchanged. See docs/ha-deployment.md.
+// ---------------------------------------------------------------------------
+builder.AddRedisDistributedCache("cache");
 
 // ---------------------------------------------------------------------------
 // Zitadel auto-provisioning hand-off.
@@ -39,6 +55,11 @@ builder.Services.Configure<BackendServiceOptions>(
 // all come from the OidcAuth config section (supplied per-IdP by the AppHost via env vars).
 builder.Services.AddPortaOidcAuth(builder.Configuration);
 
+// Porta's opt-in readiness health checks: idp-discovery (probes the configured IdP's discovery
+// document, bypassing the cached ConfigurationManager), distributed-cache, and data-protection.
+// Registration only - Porta never maps endpoints; this BFF exposes them below at /health/ready.
+builder.Services.AddPortaHealthChecks();
+
 // A custom transformer that aggregates two backend calls into one BFF response.
 builder.Services.AddTransformer<UserDashboardTransformer>();
 
@@ -66,6 +87,21 @@ var providerLabel = builder.Configuration["Demo:ProviderLabel"] ?? "OIDC";
 // Landing page: a Razor Page (Pages/Index.cshtml, routed to "/") that shows who you are
 // and links to the flows. Anonymous so you can see the "logged out" state before authenticating.
 app.MapRazorPages();
+
+// Readiness probe (dev-only) for the demo's "Check health" button: Porta's checks (tagged
+// "ready") rendered as JSON so the landing page can show each dependency probe individually.
+// Anonymous - readiness must answer before any session exists, and RequireAuthorizationByDefault
+// would otherwise gate it. Stop the IdP container in the Aspire dashboard and re-run to watch
+// porta:idp-discovery flip to Unhealthy (HTTP 503) while /alive stays green. (ServiceDefaults'
+// MapDefaultEndpoints already maps /health and /alive; this adds a JSON, per-check readiness view.)
+if (app.Environment.IsDevelopment())
+{
+    app.MapHealthChecks("/health/ready", new HealthCheckOptions
+    {
+        Predicate = registration => registration.Tags.Contains("ready"),
+        ResponseWriter = WriteHealthJson,
+    }).AllowAnonymous();
+}
 
 // Who-am-I: the BFF session identity (claims pulled from the auth cookie).
 app.MapGet("/bff/user", (HttpContext ctx) =>
@@ -137,6 +173,27 @@ app.MapTransformer<UserDashboardTransformer, DashboardResponse>()
     .Build();
 
 app.Run();
+
+// Renders a HealthReport as JSON with a per-check breakdown (name / status / description /
+// duration / data) so the demo page can list each Porta probe instead of a bare "Healthy".
+static Task WriteHealthJson(HttpContext context, HealthReport report)
+{
+    context.Response.ContentType = "application/json";
+    return context.Response.WriteAsJsonAsync(new
+    {
+        status = report.Status.ToString(),
+        totalDurationMs = (long)report.TotalDuration.TotalMilliseconds,
+        checks = report.Entries.Select(entry => new
+        {
+            name = entry.Key,
+            status = entry.Value.Status.ToString(),
+            description = entry.Value.Description,
+            durationMs = (long)entry.Value.Duration.TotalMilliseconds,
+            error = entry.Value.Exception?.Message,
+            data = entry.Value.Data.Count > 0 ? entry.Value.Data : null,
+        }),
+    });
+}
 
 namespace Demo.Bff
 {

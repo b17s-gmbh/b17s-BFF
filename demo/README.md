@@ -10,6 +10,7 @@ A self-contained, **run-out-of-the-box** demonstration and functional-test harne
 | Resource | Type | Purpose |
 |---|---|---|
 | `keycloak` | container | IdP #1. Realm + confidential client + test user imported from JSON (zero-touch). |
+| `valkey` | container | Shared distributed cache (Redis-protocol). Both BFFs' `IDistributedCache` — the auth ticket / session store — so a session survives across replicas. |
 | `postgres` | container | Database for Zitadel. |
 | `zitadel` | container | IdP #2. First instance seeded with an admin + a machine service account. |
 | `zitadel-provisioner` | project | One-shot init: creates Zitadel's OIDC app via API, writes its client id/secret to a file. |
@@ -25,12 +26,12 @@ provider — which mirrors how Porta is actually configured in production.
   browser ── /bff/* ──▶│ bff-keycloak │──▶ backend (/weather, /me)
                        │  (b17s.Porta)│      ▲
                        └──────┬───────┘      │ user token forwarded
-                              │ OIDC         │
-                              ▼              │
-                          keycloak           │
-                                             │
-                       ┌──────────────┐      │
-  browser ── /bff/* ──▶│ bff-zitadel  │──────┘
+                              │ OIDC  └──────┼──▶ valkey (shared session/ticket store)
+                              ▼              │      ▲
+                          keycloak           │      │
+                                             │      │
+                       ┌──────────────┐      │      │
+  browser ── /bff/* ──▶│ bff-zitadel  │──────┘──────┘
                        │  (b17s.Porta)│
                        └──────┬───────┘
                               │ OIDC
@@ -38,11 +39,15 @@ provider — which mirrors how Porta is actually configured in production.
                        zitadel ──▶ postgres
 ```
 
+Both BFFs point their `IDistributedCache` at the one `valkey` container, so the auth ticket /
+session store is shared — the no-sticky-sessions posture from [the HA guide](../docs/ha-deployment.md).
+The demo's **Check health** button surfaces Porta's `distributed-cache` probe against it.
+
 ## Prerequisites
 
 - **.NET 10 SDK** (the repo targets `net10.0`).
 - **A container runtime** — Docker Desktop or Podman. Aspire uses it to run Keycloak, Zitadel,
-  and Postgres. *(There is no workload to install; Aspire 13 is purely NuGet-based.)*
+  Postgres, and Valkey. *(There is no workload to install; Aspire 13 is purely NuGet-based.)*
 - For the E2E tests: nothing extra — Playwright downloads its Chromium build automatically.
 
 ## Run it

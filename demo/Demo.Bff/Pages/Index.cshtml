@@ -81,6 +81,26 @@
         }
     </div>
 
+    <h2>Readiness</h2>
+    <p class="muted">
+        Porta's opt-in health checks (<code>AddPortaHealthChecks()</code>), exposed by this BFF at
+        <code>/health/ready</code>. Try stopping the identity-provider container in the Aspire dashboard
+        and re-running — <code>porta:idp-discovery</code> flips to Unhealthy (HTTP 503) while
+        <code>/alive</code> stays green.
+    </p>
+
+    <div class="endpoints">
+        <div class="endpoint">
+            <div class="endpoint-head">
+                <span class="method">GET</span>
+                <code class="path">/health/ready</code>
+                <button class="run" type="button" data-method="GET" data-url="/health/ready">Check health</button>
+            </div>
+            <p class="endpoint-desc muted">Runs the idp-discovery, distributed-cache, and data-protection probes, each reported individually.</p>
+            <pre class="endpoint-result" hidden></pre>
+        </div>
+    </div>
+
     <script src="~/js/site.js"></script>
 </body>
 </html>
