@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-06
+### Changed
+- Docs improvements
+### Added
+- `AllowForwardingHeaders(headers, destinationHosts?)` on `MapTransformer`/`MapPassThrough` endpoints: opts specific client request headers (e.g. `Accept-Language`, `X-Request-Id`) into the backend call without writing a custom transformer.
+- `AddPortaHealthChecks()`: opt-in, zero-config health checks for Porta dependencies; see [health-checks docs](docs/health-checks.md).
+
 ## [0.3.1-rc.6] - 2026-06-23
 ### Added
 - Warning during bootstrap and docs regarding backend catch-all route interpolation

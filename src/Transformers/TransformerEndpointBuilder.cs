@@ -14,6 +14,7 @@ using Microsoft.Extensions.Caching.Hybrid;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 
 namespace b17s.Porta.Transformers;
 
@@ -39,6 +40,8 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
     private readonly IServiceProvider _services;
     private readonly PortaCoreOptions _options;
     private Func<HttpContext, bool>? _whenPredicate;
+    private HashSet<string>? _forwardedRequestHeaders;
+    private HashSet<string>? _forwardedHeaderDestinationHosts;
 
     private protected TransformerEndpointBuilderBase(IEndpointRouteBuilder endpoints, IServiceProvider services)
     {
@@ -184,6 +187,69 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
     }
 
     /// <summary>
+    /// Forwards the listed client request headers onto the backend call. A typed endpoint builds
+    /// its backend request from scratch, so by default NO client headers are forwarded; this opts
+    /// specific ones in (e.g. <c>Accept-Language</c>, <c>X-Request-Id</c>) without writing a custom
+    /// transformer. Header names are case-insensitive.
+    /// </summary>
+    /// <param name="headers">
+    /// Header names to forward when present on the incoming request. Hop-by-hop headers
+    /// (<c>Connection</c>, <c>Host</c>, ...), framing headers (<c>Content-Length</c>,
+    /// <c>Transfer-Encoding</c>) and entity headers describing the request body
+    /// (<c>Content-Type</c>, <c>Content-Encoding</c>, ...) are rejected here: the first two can
+    /// never be relayed, and the typed pipeline serializes its own backend body. Listing a
+    /// sensitive header (<c>Cookie</c>, <c>Authorization</c>, <c>X-Forwarded-*</c>) is an explicit
+    /// opt-in, mirroring raw-forward's allow-list - understand what the backend receives before
+    /// doing so.
+    /// </param>
+    /// <param name="destinationHosts">
+    /// Optional backend hosts the forwarded headers may reach, matched per request against the
+    /// interpolated backend URL (route values can steer the host). Null or empty forwards to any
+    /// destination.
+    /// </param>
+    public TBuilder AllowForwardingHeaders(IEnumerable<string> headers, IEnumerable<string>? destinationHosts = null)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+
+        _forwardedRequestHeaders ??= new(StringComparer.OrdinalIgnoreCase);
+        foreach (var header in headers)
+        {
+            if (string.IsNullOrWhiteSpace(header))
+            {
+                throw new ArgumentException("Header names must be non-empty.", nameof(headers));
+            }
+            // Reject never-forwardable names at configuration time instead of silently skipping
+            // them per request - a listed header that can't work is a misconfiguration.
+            if (RawForwardHeaderFilter.IsHopByHopHeader(header) || RawForwardHeaderFilter.IsRequestFramingHeader(header))
+            {
+                throw new ArgumentException(
+                    $"Header '{header}' is a hop-by-hop or framing header and can never be forwarded to a backend.",
+                    nameof(headers));
+            }
+            if (RawForwardHeaderFilter.IsContentHeader(header))
+            {
+                throw new ArgumentException(
+                    $"Header '{header}' is an entity header describing the request body. Typed endpoints " +
+                    "serialize their own backend body, so client entity headers cannot be forwarded; use " +
+                    "MapRawForward() to relay a body verbatim.",
+                    nameof(headers));
+            }
+            _forwardedRequestHeaders.Add(header);
+        }
+
+        if (destinationHosts != null)
+        {
+            _forwardedHeaderDestinationHosts ??= new(StringComparer.OrdinalIgnoreCase);
+            foreach (var host in destinationHosts)
+            {
+                _forwardedHeaderDestinationHosts.Add(host);
+            }
+        }
+
+        return Self;
+    }
+
+    /// <summary>
     /// Configures multiple named backend endpoints for multi-backend transformers using a fluent
     /// collection builder, avoiding object initializers:
     /// <code>
@@ -323,6 +389,7 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
         ValidateTrustedHostsForUserTokenForwarding();
         ValidateTokenExchangeAudienceResolvable();
         ValidateCacheableLegsAtStartup();
+        ValidateForwardedHeaderConfiguration();
 
         // Warn (don't fail) when a catch-all route is paired with a plain backend placeholder: the
         // '/' separators in the bound value would be encoded to %2F and the backend would 404 on
@@ -344,6 +411,8 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
         var tokenExchangeAudience = _tokenExchangeAudience;
         var backendAuthPolicy = _backendAuthPolicy;
         var backendRequestContentType = _backendRequestContentType;
+        var forwardedRequestHeaders = _forwardedRequestHeaders;
+        var forwardedHeaderDestinationHosts = _forwardedHeaderDestinationHosts;
         // Defense-in-depth: the auth metadata we attach below can be overridden by a caller
         // who chains .AllowAnonymous() onto the RouteHandlerBuilder we return from Build().
         // Re-check the principal inside the handler so user-token forwarding / token exchange
@@ -433,12 +502,19 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
                         ? context.Request.Method
                         : backendMethod!;
 
+                    var interpolatedUrl = RouteUrlInterpolator.AppendQueryString(
+                        RouteUrlInterpolator.Interpolate(backendUrl!, transformerContext.RouteValues),
+                        context.Request.QueryString.Value);
+
                     transformerContext.Properties["BackendRequest"] = new BackendRequest
                     {
                         Method = effectiveBackendMethod,
-                        Url = RouteUrlInterpolator.AppendQueryString(
-                            RouteUrlInterpolator.Interpolate(backendUrl!, transformerContext.RouteValues),
-                            context.Request.QueryString.Value),
+                        Url = interpolatedUrl,
+                        Headers = ForwardedRequestHeaders.Collect(
+                            transformerContext.RequestHeaders,
+                            forwardedRequestHeaders,
+                            forwardedHeaderDestinationHosts,
+                            interpolatedUrl),
                         AccessToken = authContext.AccessToken,
                         Timeout = timeout,
                         UseTokenExchange = useTokenExchange,
@@ -657,6 +733,42 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
         }
     }
 
+    // AllowForwardingHeaders() rides on the single-backend BackendRequest the endpoint handler
+    // builds; named backend legs (ToBackends) construct their own requests inside the transformer,
+    // where the allow-list is invisible - fail the boot rather than silently not forwarding.
+    // The Authorization check catches configuration where a built-in backend-auth policy would
+    // silently overwrite the forwarded client value: BackendCaller merges custom headers BEFORE
+    // applying backend auth, and the built-in handlers assign Authorization outright.
+    private void ValidateForwardedHeaderConfiguration()
+    {
+        if (_forwardedRequestHeaders is not { Count: > 0 })
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(_backendUrl))
+        {
+            throw new InvalidOperationException(
+                $"Porta: endpoint '{_httpMethod} {_routePattern}' calls AllowForwardingHeaders() but configures " +
+                "no single backend (ToBackend/ToGet/...). Header forwarding is not supported on named " +
+                "multi-backend legs; set BackendRequest.Headers inside the transformer instead.");
+        }
+
+        var policySetsAuthorization =
+            _useTokenExchange
+            || _backendAuthPolicy is BackendAuthPolicies.BasicAuth
+                or BackendAuthPolicies.BearerToken
+                or BackendAuthPolicies.TokenExchange;
+        if (policySetsAuthorization && _forwardedRequestHeaders.Contains("Authorization"))
+        {
+            throw new InvalidOperationException(
+                $"Porta: endpoint '{_httpMethod} {_routePattern}' forwards the client's Authorization header via " +
+                "AllowForwardingHeaders(), but its backend-auth policy sets Authorization too and would silently " +
+                "overwrite the forwarded value. Remove 'Authorization' from the allow-list or drop the " +
+                "backend-auth policy / token exchange for this endpoint.");
+        }
+    }
+
     // Cross-check every cacheable leg of an AggregatingTransformer at boot, so a user-varying leg
     // cached without a per-user key (or a non-cacheable verb, or a missing HybridCache registration)
     // fails at startup instead of on the first request. The same checks run again at request time -
@@ -788,6 +900,54 @@ public sealed class TransformerEndpointBuilder<TTransformer, TResponse>
             baseTransformer.InitializeLogger(transformerContext);
         }
         return await transformer.TransformAsync(transformerContext);
+    }
+}
+
+/// <summary>
+/// Builds the forwarded-header dictionary for a typed endpoint's <see cref="BackendRequest"/>
+/// from the <c>AllowForwardingHeaders()</c> allow-list. Exposed for unit testing.
+/// </summary>
+internal static class ForwardedRequestHeaders
+{
+    /// <summary>
+    /// Returns the client request headers to copy onto the backend request, or null when nothing
+    /// is configured, the destination host is out of scope, or no listed header is present.
+    /// </summary>
+    public static Dictionary<string, string>? Collect(
+        IReadOnlyDictionary<string, StringValues> requestHeaders,
+        IReadOnlySet<string>? allowedHeaders,
+        IReadOnlySet<string>? allowedDestinationHosts,
+        string destinationUrl)
+    {
+        if (allowedHeaders is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        // Host scoping mirrors raw-forward's AllowedDestinationHosts: empty means any destination.
+        // Checked per request (not at Build()) because route-value interpolation can steer the
+        // backend host.
+        if (allowedDestinationHosts is { Count: > 0 })
+        {
+            var host = Uri.TryCreate(destinationUrl, UriKind.Absolute, out var uri) ? uri.Host : null;
+            if (host is null || !allowedDestinationHosts.Contains(host))
+            {
+                return null;
+            }
+        }
+
+        Dictionary<string, string>? headers = null;
+        foreach (var name in allowedHeaders)
+        {
+            if (requestHeaders.TryGetValue(name, out var values) && values.Count > 0)
+            {
+                // StringValues.ToString() folds multi-value headers with "," - the same folding
+                // the raw-forward path applies to custom headers.
+                (headers ??= new(StringComparer.OrdinalIgnoreCase))[name] = values.ToString();
+            }
+        }
+
+        return headers;
     }
 }
 

@@ -264,6 +264,20 @@ public sealed class PassThroughEndpointBuilder<TResponse>
         return this;
     }
 
+    /// <summary>
+    /// Forwards the listed client request headers onto the backend call. By default a pass-through
+    /// endpoint forwards no client headers. See
+    /// <see cref="TransformerEndpointBuilderBase{TTransformer, TBuilder}.AllowForwardingHeaders"/>
+    /// for the filtering rules and the security implications of listing sensitive headers.
+    /// </summary>
+    public PassThroughEndpointBuilder<TResponse> AllowForwardingHeaders(
+        IEnumerable<string> headers,
+        IEnumerable<string>? destinationHosts = null)
+    {
+        _inner.AllowForwardingHeaders(headers, destinationHosts);
+        return this;
+    }
+
     /// <summary>Builds and registers the pass-through endpoint.</summary>
     public RouteHandlerBuilder Build() => _inner.Build();
 }

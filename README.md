@@ -3,6 +3,7 @@
 [![CI](https://github.com/b17s-gmbh/b17s-Porta/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/b17s-gmbh/b17s-Porta/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/b17s.Porta.svg)](https://www.nuget.org/packages/b17s.Porta/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-b17s.net-0a7ea4.svg)](https://b17s.net/docs/porta)
 
 Porta is your way to create completely customizable, easy-to-implement, boiler-plate code free Backend-For-Frontend (BFF) services with opinionated, sensible defaults.
 Its architecture hooks into ASP.Net Core's minimal API design, and extends it via transformer-based API aggregation with multi-frontend/backend authentication support.
@@ -20,6 +21,7 @@ Its architecture hooks into ASP.Net Core's minimal API design, and extends it vi
 - **Raw Forwarding**: Zero-code proxy endpoints for binary content, files, and non-JSON APIs
 - **GraphQL Support**: REST facade over GraphQL backends
 - **OpenTelemetry**: Automatic distributed tracing for all transformers and backend calls
+- **Health Checks**: Opt-in readiness checks for the IdP, session store, and Data Protection keys
 
 ## Installation
 
@@ -150,6 +152,7 @@ app.MapTransformer<ProductsTransformer, ProductsResponse>()
 | [Caching](docs/caching.md) | Output caching endpoints, distributed (HA) cache, and per-leg aggregation caching |
 | [GraphQL](docs/graphql.md) | Calling GraphQL backends from REST endpoints |
 | [Telemetry](docs/telemetry.md) | OpenTelemetry traces and metrics |
+| [Health Checks](docs/health-checks.md) | Readiness checks for the IdP, distributed cache, and Data Protection |
 | [HA Deployment](docs/ha-deployment.md) | Running multiple replicas behind a load balancer without sticky sessions |
 | [API Gateway Use](docs/api-gateway.md) | When to use this library as a gateway, and when to pick something else |
 | [Advanced](docs/advanced.md) | API versioning, MapGroup, OpenAPI metadata, and composing framework features |

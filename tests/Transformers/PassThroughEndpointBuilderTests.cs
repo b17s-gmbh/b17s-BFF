@@ -361,6 +361,202 @@ public sealed class PassThroughEndpointBuilderTests
         }
     }
 
+    public sealed class HeaderForwarding
+    {
+        [Fact]
+        public async Task Default_ForwardsNoClientHeaders()
+        {
+            // The typed pipeline builds its backend request from scratch; without an explicit
+            // allow-list, ambient client headers (User-Agent, tracing noise, cookies) must not
+            // leak to the backend.
+            var backend = new MockBackendCaller()
+                .SetupResponse("https://backend.test/x", new EchoResponse { Echoed = "ok" });
+            using var bff = await CreateBffAsync(endpoints => endpoints
+                .MapPassThrough<EchoResponse>()
+                .FromGet("/api/x")
+                .ToGet("https://backend.test/x")
+                .AllowAnonymous()
+                .Build(), backend);
+
+            var client = bff.GetTestServer().CreateClient();
+            client.DefaultRequestHeaders.Add("X-Request-Id", "req-1");
+            await client.GetAsync("/api/x", TestContext.Current.CancellationToken);
+
+            var recorded = Assert.Single(backend.RecordedCalls);
+            Assert.Null(recorded.Request.Headers);
+        }
+
+        [Fact]
+        public async Task AllowForwardingHeaders_CopiesListedHeaders_AndOnlyThose()
+        {
+            var backend = new MockBackendCaller()
+                .SetupResponse("https://backend.test/x", new EchoResponse { Echoed = "ok" });
+            using var bff = await CreateBffAsync(endpoints => endpoints
+                .MapPassThrough<EchoResponse>()
+                .FromGet("/api/x")
+                .ToGet("https://backend.test/x")
+                .AllowForwardingHeaders(["X-Request-Id"])
+                .AllowAnonymous()
+                .Build(), backend);
+
+            var client = bff.GetTestServer().CreateClient();
+            client.DefaultRequestHeaders.Add("X-Request-Id", "req-1");
+            client.DefaultRequestHeaders.Add("Accept-Language", "de-DE");
+            await client.GetAsync("/api/x", TestContext.Current.CancellationToken);
+
+            var recorded = Assert.Single(backend.RecordedCalls);
+            Assert.NotNull(recorded.Request.Headers);
+            var header = Assert.Single(recorded.Request.Headers!);
+            Assert.Equal("X-Request-Id", header.Key);
+            Assert.Equal("req-1", header.Value);
+        }
+
+        [Fact]
+        public async Task AllowForwardingHeaders_MatchesHeaderNames_CaseInsensitively()
+        {
+            var backend = new MockBackendCaller()
+                .SetupResponse("https://backend.test/x", new EchoResponse { Echoed = "ok" });
+            using var bff = await CreateBffAsync(endpoints => endpoints
+                .MapPassThrough<EchoResponse>()
+                .FromGet("/api/x")
+                .ToGet("https://backend.test/x")
+                .AllowForwardingHeaders(["x-request-id"])
+                .AllowAnonymous()
+                .Build(), backend);
+
+            var client = bff.GetTestServer().CreateClient();
+            client.DefaultRequestHeaders.Add("X-Request-Id", "req-1");
+            await client.GetAsync("/api/x", TestContext.Current.CancellationToken);
+
+            var recorded = Assert.Single(backend.RecordedCalls);
+            Assert.NotNull(recorded.Request.Headers);
+            Assert.Equal("req-1", Assert.Single(recorded.Request.Headers!).Value);
+        }
+
+        [Fact]
+        public async Task AllowForwardingHeaders_FoldsMultiValueHeaders_WithComma()
+        {
+            var backend = new MockBackendCaller()
+                .SetupResponse("https://backend.test/x", new EchoResponse { Echoed = "ok" });
+            using var bff = await CreateBffAsync(endpoints => endpoints
+                .MapPassThrough<EchoResponse>()
+                .FromGet("/api/x")
+                .ToGet("https://backend.test/x")
+                .AllowForwardingHeaders(["X-Custom"])
+                .AllowAnonymous()
+                .Build(), backend);
+
+            var client = bff.GetTestServer().CreateClient();
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/x");
+            request.Headers.Add("X-Custom", ["a", "b"]);
+            await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+            var recorded = Assert.Single(backend.RecordedCalls);
+            Assert.Equal("a,b", Assert.Single(recorded.Request.Headers!).Value);
+        }
+
+        [Fact]
+        public async Task AllowForwardingHeaders_SkipsForwarding_WhenDestinationHostNotInScope()
+        {
+            // Host scoping mirrors raw-forward's AllowedDestinationHosts: a non-matching backend
+            // host means the allow-list does not apply and nothing is forwarded.
+            var backend = new MockBackendCaller()
+                .SetupResponse("https://backend.test/x", new EchoResponse { Echoed = "ok" });
+            using var bff = await CreateBffAsync(endpoints => endpoints
+                .MapPassThrough<EchoResponse>()
+                .FromGet("/api/x")
+                .ToGet("https://backend.test/x")
+                .AllowForwardingHeaders(["X-Request-Id"], destinationHosts: ["other.test"])
+                .AllowAnonymous()
+                .Build(), backend);
+
+            var client = bff.GetTestServer().CreateClient();
+            client.DefaultRequestHeaders.Add("X-Request-Id", "req-1");
+            await client.GetAsync("/api/x", TestContext.Current.CancellationToken);
+
+            var recorded = Assert.Single(backend.RecordedCalls);
+            Assert.Null(recorded.Request.Headers);
+        }
+
+        [Fact]
+        public async Task AllowForwardingHeaders_Forwards_WhenDestinationHostInScope()
+        {
+            var backend = new MockBackendCaller()
+                .SetupResponse("https://backend.test/x", new EchoResponse { Echoed = "ok" });
+            using var bff = await CreateBffAsync(endpoints => endpoints
+                .MapPassThrough<EchoResponse>()
+                .FromGet("/api/x")
+                .ToGet("https://backend.test/x")
+                .AllowForwardingHeaders(["X-Request-Id"], destinationHosts: ["BACKEND.test"])
+                .AllowAnonymous()
+                .Build(), backend);
+
+            var client = bff.GetTestServer().CreateClient();
+            client.DefaultRequestHeaders.Add("X-Request-Id", "req-1");
+            await client.GetAsync("/api/x", TestContext.Current.CancellationToken);
+
+            var recorded = Assert.Single(backend.RecordedCalls);
+            Assert.Equal("req-1", Assert.Single(recorded.Request.Headers!).Value);
+        }
+
+        [Theory]
+        [InlineData("Host")]           // hop-by-hop
+        [InlineData("Content-Length")] // framing
+        [InlineData("Content-Type")]   // entity header; the typed path serializes its own body
+        public void AllowForwardingHeaders_RejectsNeverForwardableHeaders_AtConfigurationTime(string header)
+        {
+            using var app = WebApplication.CreateBuilder().Build();
+            var builder = app.MapPassThrough<EchoResponse>()
+                .FromGet("/api/x")
+                .ToGet("https://backend.test/x");
+
+            Assert.Throws<ArgumentException>(() => builder.AllowForwardingHeaders([header]));
+        }
+
+        [Fact]
+        public void Build_Throws_WhenForwardedAuthorization_WouldBeOverwrittenByBackendAuth()
+        {
+            // BackendCaller merges custom headers before applying backend auth, and the built-in
+            // policies assign Authorization outright - the forwarded client value would silently
+            // vanish. That contradiction must fail the boot, not ship.
+            var ex = Assert.Throws<InvalidOperationException>(() =>
+            {
+                using var app = WebApplication.CreateBuilder().Build();
+                app.MapPassThrough<EchoResponse>()
+                    .FromGet("/api/x")
+                    .ToGet("https://backend.test/x")
+                    .WithBackendAuth(BackendAuthPolicies.BearerToken)
+                    .AllowForwardingHeaders(["Authorization"])
+                    .RequireAuth()
+                    .Build();
+            });
+            Assert.Contains("Authorization", ex.Message);
+        }
+
+        [Fact]
+        public async Task AllowForwardingHeaders_ForwardsAuthorization_WhenNoBackendAuthPolicySet()
+        {
+            // Listing Authorization is an explicit opt-in (mirroring raw-forward) and is legal
+            // when no backend-auth policy competes for the header.
+            var backend = new MockBackendCaller()
+                .SetupResponse("https://backend.test/x", new EchoResponse { Echoed = "ok" });
+            using var bff = await CreateBffAsync(endpoints => endpoints
+                .MapPassThrough<EchoResponse>()
+                .FromGet("/api/x")
+                .ToGet("https://backend.test/x")
+                .AllowForwardingHeaders(["Authorization"])
+                .AllowAnonymous()
+                .Build(), backend);
+
+            var client = bff.GetTestServer().CreateClient();
+            client.DefaultRequestHeaders.Add("Authorization", "Bearer client-token");
+            await client.GetAsync("/api/x", TestContext.Current.CancellationToken);
+
+            var recorded = Assert.Single(backend.RecordedCalls);
+            Assert.Equal("Bearer client-token", Assert.Single(recorded.Request.Headers!).Value);
+        }
+    }
+
     public sealed class Predicate
     {
         [Fact]

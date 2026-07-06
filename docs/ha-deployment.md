@@ -287,8 +287,20 @@ If you see `14500` or `14501` in production logs, your deployment is not HA-safe
 
 When you rotate `DataProtection.ApplicationName`, you invalidate every active session (which is the point - that's the documented reset switch).
 
+## Health Probes
+
+`AddPortaHealthChecks()` registers readiness checks for exactly the pieces this page tells you
+to share: the distributed cache (sessions/locks/revocation), the Data Protection key ring and
+key store, plus network-level IdP discovery reachability. Wire them into your readiness probe
+only - a dependency outage should pull replicas from rotation, not restart them. When the check
+detects the in-memory `MemoryDistributedCache` in a deployment that bothers with probes, it
+logs a warning: that combination means sessions are not shared across replicas. See
+[Health Checks](health-checks.md) for registration, Kubernetes wiring, and the
+Degraded-vs-Unhealthy semantics.
+
 ## Related
 
+- [Health Checks](health-checks.md) - readiness probes for the shared stores and the IdP.
 - [Configuration](configuration.md) - full options reference.
 - [Authentication](authentication.md) - session, reference token, JWT providers.
 - [OIDC Endpoints](oidc.md) - login/logout/back-channel logout middleware.

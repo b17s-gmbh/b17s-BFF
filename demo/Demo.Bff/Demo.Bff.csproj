@@ -1,6 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
+    <!-- Registers IDistributedCache backed by the "cache" Valkey resource (see AppHost).
+         This is Porta's HA "thing #1": the shared ticket/session store across replicas. -->
+    <PackageReference Include="Aspire.StackExchange.Redis.DistributedCaching" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Demo.ServiceDefaults/Demo.ServiceDefaults.csproj" />
     <!-- The whole point of the demo: consume the b17s.Porta library as a real consumer would. -->
     <ProjectReference Include="../../src/b17s.Porta.csproj" />
