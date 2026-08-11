@@ -59,6 +59,7 @@ All counters and histograms below are emitted under the `b17s.Porta` meter. Sour
 | `bff.backend.errors` | `service`, `protocol`, `status_code` | Backend requests with `status_code >= 400`. |
 | `bff.auth.failures` | `reason`, `provider` (optional) | Authentication failures (`reason` = `unauthenticated`, `provider_threw`). |
 | `bff.auth.successes` | `provider` (optional) | Successful authentications (`provider` = short provider name, e.g. `SessionAuthProvider`). |
+| `bff.auth.challenges` | `outcome` | Default challenge responses (`redirect` or `unauthorized`). |
 | `bff.token.refreshes` | `reason` (optional) | Successful token refreshes at the IdP (cookie-session refresh, plus `reason` = `api_token` for API-token refreshes). |
 | `bff.token.refresh_failures` | `reason` (optional) | Failed token refreshes (`reason` = `invalid_grant`, `transient`, `api_token`). |
 | `bff.csrf.validation_failures` | `reason` | Antiforgery/CSRF validation failures (`reason` = `oidc_logout`, `session_admin`). |

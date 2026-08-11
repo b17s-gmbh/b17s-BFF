@@ -68,7 +68,8 @@ public static class OidcEndpointExtensions
         // Presence of the registry is the sentinel for AddOidcEndpoints having run; without it
         // the middleware would fail at pipeline build with an opaque "Unable to resolve service
         // for type 'IReturnUrlProtector'" instead of this actionable message.
-        _ = GetPipelineRegistry(app, nameof(UseOidcLogin));
+        var registry = GetPipelineRegistry(app, nameof(UseOidcLogin));
+        registry.RecordLoginPath(path);
 
         var options = BuildEndpointOptions(app, configureOptions);
 

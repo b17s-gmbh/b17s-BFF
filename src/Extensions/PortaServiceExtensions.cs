@@ -658,6 +658,7 @@ public static class PortaServiceExtensions
         // mutation on one silently affect the other, defeating the single-source-of-truth
         // intent of this copy.
         target.Cookie = source.Cookie.Clone();
+        target.Challenge = source.Challenge.Clone();
         target.Resilience = source.Resilience.Clone();
         target.DataProtection = source.DataProtection.Clone();
         target.SessionKeys = source.SessionKeys.Clone();

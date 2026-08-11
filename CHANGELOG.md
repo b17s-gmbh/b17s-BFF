@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-rc.1] - 2026-08-11
+### Breaking Change
+- The default OIDC challenge now uses automatic dispatch: safe top-level document navigations redirect to the identity provider, while fetches, unsafe methods, and embedded navigations receive a cache-disabled 401 problem response. Set `SessionAuthentication.Challenge.Mode` to `Interactive` to restore the previous always-redirect behavior.
+- The default forbid scheme now returns a plain 403 instead of forwarding to the OIDC handler. Apps that configured `AccessDeniedPath` on the OIDC options no longer get that redirect from the default `ForbidAsync`; challenge (or forbid) the OIDC scheme explicitly to keep it.
+### Added
+- `SessionAuthentication.Challenge` configuration (`Mode`, `LoginPath`, and a code-only `Classifier` hook) controlling the new challenge dispatcher; see [oidc docs](docs/oidc.md#spas-and-expired-sessions).
+- `bff.auth.challenges` counter (tag `outcome` = `redirect` | `unauthorized`) recording default-challenge dispatch decisions.
+
 ## [0.4.0] - 2026-07-06
 ### Changed
 - Docs improvements

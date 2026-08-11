@@ -30,6 +30,7 @@ public class AddPortaOidcAuthOptionsCopyTests
         var session = sp.GetRequiredService<IOptions<SessionAuthenticationConfiguration>>().Value;
 
         Assert.NotSame(oidc.Cookie, session.Cookie);
+        Assert.NotSame(oidc.Challenge, session.Challenge);
         Assert.NotSame(oidc.Resilience, session.Resilience);
         Assert.NotSame(oidc.DataProtection, session.DataProtection);
         Assert.NotSame(oidc.SessionKeys, session.SessionKeys);

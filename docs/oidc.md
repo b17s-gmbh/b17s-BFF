@@ -26,6 +26,54 @@ POST /bff/logout →  SignOutAsync(Cookie + OIDC schemes)
                      is relaxed to SameSite=Lax)
 ```
 
+## SPAs and expired sessions
+
+Porta's default challenge scheme dispatches according to the request shape. A safe
+`GET` or `HEAD` top-level document navigation (`Sec-Fetch-Mode: navigate` and
+`Sec-Fetch-Dest: document`) redirects to OIDC. Fetches, iframe navigations, unsafe
+methods, and other programmatic requests receive:
+
+```http
+HTTP/1.1 401 Unauthorized
+Content-Type: application/problem+json
+Cache-Control: no-store
+Vary: Sec-Fetch-Mode, Sec-Fetch-Dest, Accept
+
+{"type":"urn:porta:session-expired","title":"Authentication required","status":401,"login":"/bff/login"}
+```
+
+For older clients without Fetch Metadata headers, a safe request redirects only when
+its parsed `Accept` header explicitly accepts `text/html` or `text/*`; `*/*` alone is
+not treated as an interactive navigation. Fetch Metadata is browser-controlled—page
+JavaScript cannot set it, although non-browser clients can forge it. Classification
+only changes redirect versus 401 and never grants access.
+
+The response intentionally contains a bare login URL. Porta does not anonymously mint
+a signed return URL from `Referer`, because doing so would allow an attacker to obtain
+transferable tokens for attacker-selected internal destinations. An SPA that wants to
+restore the exact page (including its fragment) can keep it locally:
+
+```js
+if (response.status === 401) {
+  const problem = await response.json();
+  sessionStorage.setItem("porta:returnUrl", location.href);
+  location.assign(problem.login);
+}
+```
+
+After login reaches `OidcLoginOptions.DefaultRedirectUri`, the SPA can consume that
+session-storage value. The `login` value is the path registered via `UseOidcLogin`
+(prefixed with the request's `PathBase`); configure
+`SessionAuthentication.Challenge.LoginPath` when the application does not use
+`UseOidcLogin`, or to disambiguate multiple login endpoints. When neither is available
+the value falls back to `/bff/login`.
+Set `Challenge.Mode = ChallengeDispatchMode.Interactive` for the pre-dispatch behavior,
+or `Unauthorized` to suppress automatic redirects entirely. A custom synchronous
+`Challenge.Classifier` replaces Auto's built-in classifier and is therefore
+security-sensitive. Explicit calls to `ChallengeAsync(OpenIdConnectDefaults.AuthenticationScheme)`
+always invoke OIDC directly and never enter the dispatcher. `ForbidAsync` on the
+default scheme returns a plain 403 with no redirect.
+
 ## Service registration
 
 Single entry point. Pass an `IConfiguration` containing the `SessionAuthentication` section (or your own section name).

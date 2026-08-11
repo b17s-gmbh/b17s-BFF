@@ -63,6 +63,7 @@ internal sealed class SessionAuthenticationConfigurationValidator
         {
             errors.Add("SessionAuthentication.Cookie must be set.");
         }
+
         else
         {
             if (!IsValidSecurePolicy(options.Cookie.SecurePolicy))
@@ -99,6 +100,24 @@ internal sealed class SessionAuthenticationConfigurationValidator
                 errors.Add(
                     $"SessionAuthentication.Cookie.ExpireTimeSpanMinutes must be > 0. " +
                     $"Got: {options.Cookie.ExpireTimeSpanMinutes}.");
+            }
+        }
+
+        if (options.Challenge is null)
+        {
+            errors.Add("SessionAuthentication.Challenge must be set.");
+        }
+        else
+        {
+            if (!Enum.IsDefined(options.Challenge.Mode))
+            {
+                errors.Add($"SessionAuthentication.Challenge.Mode '{options.Challenge.Mode}' is not valid.");
+            }
+
+            if (options.Challenge.LoginPath is { } loginPath
+                && (!loginPath.StartsWith('/') || loginPath.StartsWith("//", StringComparison.Ordinal)))
+            {
+                errors.Add("SessionAuthentication.Challenge.LoginPath must be a local absolute path beginning with one '/'.");
             }
         }
 

@@ -24,6 +24,7 @@ public sealed class PortaMetrics
     // Counters
     private readonly Counter<long> _authenticationFailures;
     private readonly Counter<long> _authenticationSuccesses;
+    private readonly Counter<long> _authenticationChallenges;
     private readonly Counter<long> _tokenRefreshes;
     private readonly Counter<long> _tokenRefreshFailures;
     private readonly Counter<long> _backendRequests;
@@ -67,6 +68,10 @@ public sealed class PortaMetrics
         _authenticationSuccesses = _meter.CreateCounter<long>(
             "bff.auth.successes",
             description: "Number of successful authentications");
+
+        _authenticationChallenges = _meter.CreateCounter<long>(
+            "bff.auth.challenges",
+            description: "Number of authentication challenges by response outcome");
 
         _tokenRefreshes = _meter.CreateCounter<long>(
             "bff.token.refreshes",
@@ -192,6 +197,10 @@ public sealed class PortaMetrics
 
         _authenticationSuccesses.Add(1, tags);
     }
+
+    /// <summary>Records the outcome of a default authentication challenge.</summary>
+    public void RecordAuthenticationChallenge(string outcome)
+        => _authenticationChallenges.Add(1, new KeyValuePair<string, object?>("outcome", outcome));
 
     // Token metrics
 
