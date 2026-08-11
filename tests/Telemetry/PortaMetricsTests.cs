@@ -52,6 +52,18 @@ public sealed class PortaMetricsTests
         Assert.Equal("session", emissions[1].Tags["provider"]);
     }
 
+    [Fact]
+    public void RecordAuthenticationChallenge_IncludesOutcome()
+    {
+        using var harness = MetricsHarness.Create();
+
+        harness.Metrics.RecordAuthenticationChallenge("unauthorized");
+
+        var emission = Assert.Single(harness.Drain("bff.auth.challenges"));
+        Assert.Equal(1L, emission.Value);
+        Assert.Equal("unauthorized", emission.Tags["outcome"]);
+    }
+
     // -----------------------------
     // Token metrics — success/failure routed to different counters
     // -----------------------------

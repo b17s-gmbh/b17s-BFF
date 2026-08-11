@@ -135,6 +135,9 @@ builder.Services.AddPortaAuthentication(builder.Configuration);
       "ExpireTimeSpanMinutes": 60,
       "SlidingExpiration": false
     },
+    "Challenge": {
+      "Mode": "Auto"
+    },
     "DataProtection": {
       "ApplicationName": "my-porta",
       "KeyLifetimeDays": 90
@@ -261,6 +264,7 @@ Key settings that should be configured before a production deployment. The libra
 | `SessionAuthentication:Authority` / `ClientId` / `ClientSecret` | `SessionAuthentication__Authority`, etc. | **Yes** - `IValidateOptions<SessionAuthenticationConfiguration>` with `ValidateOnStart`. | Required to start the app when `AddPortaAuthentication` is called. `Authority` must be an absolute http(s) URL. |
 | `SessionAuthentication:RequireHttpsMetadata` | - | **Yes** outside Development - `CookieSecurityStartupCheck` throws (event `Porta/14703`) when set to `false`; warns (`Porta/14702`) in Development. Default `true`. | Leave `true` in production. Disabling allows the OIDC handler to fetch metadata over plain HTTP, opening a man-in-the-middle window. |
 | `SessionAuthentication:Cookie:SecurePolicy` | - | **Yes** outside Development - `CookieSecurityStartupCheck` throws (event `Porta/14701`) when not `Always`; warns (`Porta/14700`) in Development. Default `Always`. | Keep `Always` in production (see [Cookie Security](#cookie-security)). Other values can emit the auth cookie without the `Secure` attribute. |
+| `SessionAuthentication:Challenge:Mode` | - | Value validated at startup. | `Auto` (default) redirects safe document navigations and returns 401 for programmatic requests. `Interactive` restores legacy always-redirect behavior; `Unauthorized` always returns 401. |
 | `PortaCore:TrustedHosts` (when any endpoint uses `.WithUserToken()`) | `PortaCore__TrustedHosts__0`, etc. | **Yes** - startup throws if a `WithUserToken()` backend host is not in the list. | See [Trusted Hosts](authentication.md#trusted-hosts). |
 | `AllowedRedirectHosts` on `UseOidcLogin` / `UseOidcLogout` | - (configured in code, not via a config section) | Enforced at request time, not startup. | Set via `services.Configure<OidcLoginOptions>(...)` / `Configure<OidcLogoutOptions>(...)` or the per-call lambda on `UseOidcLogin` / `UseOidcLogout` (the lambda wins on conflicts). When empty, only same-origin redirects are accepted; loopback is only accepted when `AllowLocalhost = true` (default `false`). External hosts are rejected with HTTP 400. There is no top-level `Logout:AllowedRedirectHosts` config section. |
 | `ConnectionStrings:dataprotection-db` | `ConnectionStrings__dataprotection-db` | Indirect - `AddPortaDataProtectionWithEntityFrameworkStore` resolves the connection string and fails at startup when missing. | PostgreSQL connection for Data Protection keys. Required for HA - see [HA Deployment](ha-deployment.md). |
@@ -324,6 +328,8 @@ When `AddPortaAuthentication` is called, `SessionAuthenticationConfigurationVali
 - `SessionAuthentication.SessionTimeoutInMin` is not positive
 - `SessionAuthentication.Cookie.ExpireTimeSpanMinutes` is not positive
 - `SessionAuthentication.Cookie.SecurePolicy` or `Cookie.SameSite` is not one of the recognized values (see [Cookie Security](#cookie-security))
+- `SessionAuthentication.Challenge.Mode` is not a defined `ChallengeDispatchMode` value
+- `SessionAuthentication.Challenge.LoginPath` is set but is not a local absolute path beginning with a single `/`
 - `SessionAuthentication.DataProtection.KeyLifetimeDays` is below 7 (ASP.NET Core Data Protection requires a new-key lifetime of at least one week)
 
 When `AddPortaCore` is called, `PortaCoreOptionsValidator` (registered with `ValidateOnStart`) rejects startup if:

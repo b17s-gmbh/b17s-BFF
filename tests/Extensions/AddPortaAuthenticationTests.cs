@@ -1,4 +1,5 @@
 using b17s.Porta.Auth.Sessions;
+using b17s.Porta.Auth;
 using b17s.Porta.Auth.Tokens;
 using b17s.Porta.Extensions;
 
@@ -23,9 +24,15 @@ public class AddPortaAuthenticationTests
         var schemeProvider = sp.GetRequiredService<IAuthenticationSchemeProvider>();
         var cookie = await schemeProvider.GetSchemeAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         var oidc = await schemeProvider.GetSchemeAsync(OpenIdConnectDefaults.AuthenticationScheme);
+        var dispatcher = await schemeProvider.GetSchemeAsync(ChallengeDispatchHandler.SchemeName);
+        var defaults = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuthenticationOptions>>().Value;
 
         Assert.NotNull(cookie);
         Assert.NotNull(oidc);
+        Assert.NotNull(dispatcher);
+        Assert.Equal(ChallengeDispatchHandler.SchemeName, defaults.DefaultChallengeScheme);
+        Assert.Equal(ChallengeDispatchHandler.SchemeName, defaults.DefaultForbidScheme);
+        Assert.Equal(CookieAuthenticationDefaults.AuthenticationScheme, defaults.DefaultAuthenticateScheme ?? defaults.DefaultScheme);
     }
 
     [Fact]

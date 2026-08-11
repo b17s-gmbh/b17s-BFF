@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Http;
+
 namespace b17s.Porta.Configuration;
 
 /// <summary>
@@ -62,6 +64,12 @@ public class SessionAuthenticationConfiguration
     public CookieSecurityConfiguration Cookie { get; set; } = new();
 
     /// <summary>
+    /// Controls how the default authentication challenge distinguishes interactive
+    /// browser navigations from programmatic requests.
+    /// </summary>
+    public ChallengeDispatchConfiguration Challenge { get; set; } = new();
+
+    /// <summary>
     /// Token refresh resilience configuration for retry logic and circuit breaker
     /// </summary>
     public TokenRefreshResilienceConfiguration Resilience { get; set; } = new();
@@ -77,6 +85,39 @@ public class SessionAuthenticationConfiguration
     /// each BFF should have a unique key prefix to avoid collisions.
     /// </summary>
     public SessionKeyConfiguration SessionKeys { get; set; } = new();
+}
+
+/// <summary>Controls Porta's default authentication challenge dispatcher.</summary>
+public sealed class ChallengeDispatchConfiguration
+{
+    /// <summary>Gets or sets the dispatch mode. The default is <see cref="ChallengeDispatchMode.Auto"/>.</summary>
+    public ChallengeDispatchMode Mode { get; set; } = ChallengeDispatchMode.Auto;
+
+    /// <summary>
+    /// Optional final classifier override used in <see cref="ChallengeDispatchMode.Auto"/>.
+    /// Return <see langword="true"/> to redirect to OIDC or <see langword="false"/> to return 401.
+    /// This hook replaces the built-in classifier, including its safe-method check.
+    /// </summary>
+    public Func<HttpContext, bool>? Classifier { get; set; }
+
+    /// <summary>
+    /// Optional login endpoint path for applications that do not use <c>UseOidcLogin</c>,
+    /// or to disambiguate multiple registered login endpoints.
+    /// </summary>
+    public string? LoginPath { get; set; }
+
+    internal ChallengeDispatchConfiguration Clone() => (ChallengeDispatchConfiguration)MemberwiseClone();
+}
+
+/// <summary>Specifies how Porta responds to the default authentication challenge.</summary>
+public enum ChallengeDispatchMode
+{
+    /// <summary>Redirect safe interactive document navigations; return 401 otherwise.</summary>
+    Auto,
+    /// <summary>Always redirect to the configured OIDC scheme (legacy behavior).</summary>
+    Interactive,
+    /// <summary>Always return HTTP 401 without redirecting.</summary>
+    Unauthorized,
 }
 
 /// <summary>

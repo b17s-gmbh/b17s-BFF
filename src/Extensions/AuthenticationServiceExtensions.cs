@@ -1,5 +1,6 @@
 using System.Security.Claims;
 
+using b17s.Porta.Auth;
 using b17s.Porta.Auth.Discovery;
 using b17s.Porta.Auth.Providers;
 using b17s.Porta.Auth.Sessions;
@@ -249,11 +250,15 @@ public static class AuthenticationServiceExtensions
         services.AddAuthentication(options =>
         {
             options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
-            options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
+            options.DefaultChallengeScheme = ChallengeDispatchHandler.SchemeName;
+            options.DefaultForbidScheme = ChallengeDispatchHandler.SchemeName;
             options.DefaultSignOutScheme = OpenIdConnectDefaults.AuthenticationScheme;
         })
         .AddCookie()
-        .AddOpenIdConnect();
+        .AddOpenIdConnect()
+        .AddScheme<AuthenticationSchemeOptions, ChallengeDispatchHandler>(
+            ChallengeDispatchHandler.SchemeName,
+            options => options.ForwardAuthenticate = CookieAuthenticationDefaults.AuthenticationScheme);
 
         // Bind the cookie handler options from the composed configuration pipeline plus the
         // resolved ITicketStore. Deferring to options-build time (instead of an eager snapshot)

@@ -31,10 +31,34 @@ namespace b17s.Porta.Extensions;
 internal sealed class OidcEndpointPipelineRegistry
 {
     private readonly HashSet<string> _requiredPolicies = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _loginPaths = new(StringComparer.OrdinalIgnoreCase);
     private bool _globalLogoutRequested;
     private int _version;
     private int _verifiedVersion = -1;
     private readonly Lock _gate = new();
+
+    public void RecordLoginPath(string path)
+    {
+        lock (_gate)
+        {
+            _loginPaths.Add(path);
+        }
+    }
+
+    public string? GetLoginPath()
+    {
+        lock (_gate)
+        {
+            return _loginPaths.Count switch
+            {
+                0 => null,
+                1 => _loginPaths.Single(),
+                _ => throw new InvalidOperationException(
+                    "Multiple OIDC login paths are registered. Configure " +
+                    "SessionAuthentication.Challenge.LoginPath to select the path exposed in 401 responses."),
+            };
+        }
+    }
 
     public void RequirePolicy(string policyName)
     {
