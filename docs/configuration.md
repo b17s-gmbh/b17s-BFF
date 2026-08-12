@@ -87,6 +87,7 @@ builder.Services.AddPortaCore(builder.Configuration);
     "DefaultTimeout": "00:00:30",
     "MaxRetryAttempts": 3,
     "RefreshBackendTokenOn401": true,
+    "RefreshClaimsFromIdToken": true,
     "RequireAuthorizationByDefault": true,
     "EnableTelemetry": true,
     "MaxBodyLogLength": 512,
@@ -102,7 +103,7 @@ builder.Services.AddPortaCore(builder.Configuration);
 
 **What it registers:**
 - Backend caller infrastructure (HttpClients with resilience)
-- Backend auth handler registry with built-in handlers (`None`, `BearerToken`, `BasicAuth`, `TokenExchange`)
+- Backend auth handler registry with built-in handlers (`None`, `BearerToken`, `BasicAuth`, `ApiKey`, `ClientCredentials`, `TokenExchange`)
 - Trusted host validation for secure token forwarding
 - Transformer routing support
 
@@ -196,7 +197,7 @@ The per-key suffixes (`AccessTokenKey`, `IdTokenKey`, `RefreshTokenKey`, `Expire
 
 ### Backend service credentials - `BackendService`
 
-`BackendServiceOptions` (section `"BackendService"`) configures the built-in `BasicAuth` and `TokenExchange` backend-auth handlers without requiring you to write a custom `IBackendAuthHandler`.
+`BackendServiceOptions` (section `"BackendService"`) configures the built-in `BasicAuth`, `ApiKey`, `ClientCredentials`, and `TokenExchange` backend-auth handlers without requiring you to write a custom `IBackendAuthHandler`.
 
 The `"BackendService"` section is bound automatically by the `AddPortaCore(IConfiguration)` overload. If you wire core options imperatively via `AddPortaCore(Action<PortaCoreOptions>)` instead, bind it yourself: `services.Configure<BackendServiceOptions>(builder.Configuration.GetSection(BackendServiceOptions.SectionName))`.
 
@@ -207,6 +208,25 @@ The `"BackendService"` section is bound automatically by the `AddPortaCore(IConf
     "BasicAuth": { "Username": "bff", "Password": "..." },
     "Backends": {
       "PartnerApi": { "Username": "partner-bff", "Password": "..." }
+    },
+    "ApiKey": { "Token": "s3cret" },
+    "ApiKeys": {
+      "PartnerApi": { "Token": "partner-key", "HeaderName": "X-Api-Key" },
+      "LegacyApi": { "Token": "legacy-key", "Scheme": "Token" }
+    },
+    "ClientCredentials": {
+      "TokenEndpoint": "https://idp.example.com/connect/token",
+      "ClientId": "bff-m2m",
+      "ClientSecret": "...",
+      "Scope": "internal.read"
+    },
+    "ClientCredentialsBackends": {
+      "OrdersApi": {
+        "TokenEndpoint": "https://idp.example.com/connect/token",
+        "ClientId": "bff-orders",
+        "ClientSecret": "...",
+        "Scope": "orders.read orders.write"
+      }
     },
     "DefaultTokenExchangeAudience": "https://api.internal.example.com",
     "TokenExchangeAudiences": {
@@ -222,6 +242,12 @@ The `"BackendService"` section is bound automatically by the `AddPortaCore(IConf
 | `BasicAuth` | Default Basic credentials used by `BackendAuthPolicies.BasicAuth` when no per-backend entry matches. |
 | `Backends` | Per-backend Basic credentials keyed by `BackendRequest.BackendName`. Case-insensitive. |
 | `AllowGlobalBasicAuthFallback` | Default `false` (fail closed). When a request names a backend that has no matching `Backends` entry, the BasicAuth handler sends **no** `Authorization` header rather than reusing the global `BasicAuth` default (which could forward credentials meant for a different host). Set `true` for the legacy behaviour where such backends share the global default. Requests with no backend name always use `BasicAuth` regardless of this setting. |
+| `ApiKey` | Default fixed key used by `BackendAuthPolicies.ApiKey` when no per-backend entry matches. `Token` (the secret), `Scheme` (Authorization scheme, default `Bearer`), `HeaderName` (optional custom header, e.g. `X-Api-Key`; when set the token is sent raw and `Scheme` is ignored). |
+| `ApiKeys` | Per-backend API keys keyed by `BackendRequest.BackendName`. Case-insensitive. |
+| `AllowGlobalApiKeyFallback` | Default `false` (fail closed), mirroring `AllowGlobalBasicAuthFallback`: a named backend without an `ApiKeys` entry gets **no** credential rather than the global `ApiKey` default. |
+| `ClientCredentials` | Default OAuth client-credentials client used by `BackendAuthPolicies.ClientCredentials`. `TokenEndpoint`, `ClientId`, `ClientSecret` are all required when the policy is selected (a missing value fails the call as a 5xx-class configuration error); `Scope` and `Audience` are optional and omitted from the token request when unset. Deliberately **not** inherited from `SessionAuthentication` — the M2M identity is configured separately from the login client. Minted tokens are cached process-wide until 60s before `expires_in`; failures are never cached. |
+| `ClientCredentialsBackends` | Per-backend client-credentials clients keyed by `BackendRequest.BackendName`. Case-insensitive. |
+| `AllowGlobalClientCredentialsFallback` | Default `false` (fail closed): a named backend without a `ClientCredentialsBackends` entry fails the call as a configuration error rather than minting a token with the global client (whose scopes may grant more than that backend should receive). |
 | `DefaultTokenExchangeAudience` | Fallback audience for `BackendAuthPolicies.TokenExchange` when an endpoint doesn't supply one inline via `WithTokenExchange(audience)`. |
 | `TokenExchangeAudiences` | Per-backend token-exchange audience override, keyed by `BackendRequest.BackendName`. |
 

@@ -91,6 +91,14 @@ public sealed class BackendAuthContext
     /// Cancellation token for the request.
     /// </summary>
     public CancellationToken CancellationToken { get; init; }
+
+    /// <summary>
+    /// True when this application runs on the retry of a call whose first attempt the backend
+    /// rejected with <c>401</c>. Handlers that cache a credential they mint themselves (e.g. the
+    /// built-in <c>ClientCredentials</c> handler) should bypass/invalidate their cache and acquire
+    /// a fresh one; handlers whose credential comes from elsewhere can ignore it.
+    /// </summary>
+    public bool ForceFreshCredential { get; init; }
 }
 
 /// <summary>

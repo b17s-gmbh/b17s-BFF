@@ -156,6 +156,7 @@ public sealed class TransformerEndpointBuilderFluentTests
         // AllowAnonymousWithOptionalAuth lets the request through unauthenticated but still
         // calls TryGetAuthContextAsync so authenticated callers get a populated AuthContext
         // (typical use: same endpoint personalizes when known, falls back to generic otherwise).
+        // No backend auth is needed for this transformer-only use of optional auth.
         var backend = new MockBackendCaller()
             .SetupResponse("https://backend.test/maybe", new EchoResponse { Echoed = "ok" });
         var transformer = new RecordingTransformer();
@@ -177,10 +178,234 @@ public sealed class TransformerEndpointBuilderFluentTests
     }
 
     [Fact]
-    public async Task AllowAnonymous_StillPopulatesAuthContext_WhenCredentialsPresent()
+    public async Task OptionalBearerTokenBackend_ForwardsPolicyAndToken_WhenAuthenticated()
     {
-        // L14: plain AllowAnonymous() resolves auth optionally too (it is equivalent to
-        // AllowAnonymousWithOptionalAuth) - present credentials still populate the context.
+        // The optional-auth combination: WithBackendAuth(..., optional: true) on an
+        // AllowAnonymousWithOptionalAuth endpoint applies the policy for authenticated callers,
+        // so their token reaches the backend.
+        var backend = new MockBackendCaller()
+            .SetupResponse("https://backend.test/maybe", new EchoResponse { Echoed = "ok" });
+        using var bff = await CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/maybe")
+            .ToBackend("GET", "https://backend.test/maybe")
+            .WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)
+            .AllowAnonymousWithOptionalAuth()
+            .Build(), backend, authenticated: true);
+
+        var client = bff.GetTestServer().CreateClient();
+        var response = await client.GetAsync("/api/maybe", TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        var recorded = Assert.Single(backend.RecordedCalls);
+        Assert.Equal(BackendAuthPolicies.BearerToken, recorded.Request.BackendAuthPolicy);
+        Assert.Equal("user-access-token", recorded.Request.AccessToken);
+    }
+
+    [Fact]
+    public async Task OptionalBearerTokenBackend_DowngradesToNone_WhenAnonymous()
+    {
+        // Anonymous callers on an optional-auth endpoint have no token to forward, so the
+        // optional-flagged policy is downgraded to None instead of warning (BearerToken) or
+        // failing the request (TokenExchange).
+        var backend = new MockBackendCaller()
+            .SetupResponse("https://backend.test/maybe", new EchoResponse { Echoed = "ok" });
+        using var bff = await CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/maybe")
+            .ToBackend("GET", "https://backend.test/maybe")
+            .WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)
+            .AllowAnonymousWithOptionalAuth()
+            .Build(), backend);
+
+        var client = bff.GetTestServer().CreateClient();
+        var response = await client.GetAsync("/api/maybe", TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        var recorded = Assert.Single(backend.RecordedCalls);
+        Assert.Equal(BackendAuthPolicies.None, recorded.Request.BackendAuthPolicy);
+        Assert.Null(recorded.Request.AccessToken);
+    }
+
+    [Fact]
+    public async Task OptionalTokenExchange_AppliedWhenAuthenticated_DisabledWhenAnonymous()
+    {
+        // Token exchange follows the same optional rule: exchanged for authenticated callers,
+        // switched off (not failed) for anonymous ones.
+        var backend = new MockBackendCaller()
+            .SetupResponse("https://backend.test/orders", new EchoResponse { Echoed = "ok" });
+        using var authenticatedBff = await CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/orders")
+            .ToBackend("GET", "https://backend.test/orders")
+            .WithTokenExchange("orders-api", optional: true)
+            .AllowAnonymousWithOptionalAuth()
+            .Build(), backend, authenticated: true);
+
+        var response = await authenticatedBff.GetTestServer().CreateClient()
+            .GetAsync("/api/orders", TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        var recorded = Assert.Single(backend.RecordedCalls);
+        Assert.True(recorded.Request.UseTokenExchange);
+        Assert.Equal("orders-api", recorded.Request.TokenExchangeAudience);
+
+        var anonymousBackend = new MockBackendCaller()
+            .SetupResponse("https://backend.test/orders", new EchoResponse { Echoed = "ok" });
+        using var anonymousBff = await CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/orders")
+            .ToBackend("GET", "https://backend.test/orders")
+            .WithTokenExchange("orders-api", optional: true)
+            .AllowAnonymousWithOptionalAuth()
+            .Build(), anonymousBackend);
+
+        var anonymousResponse = await anonymousBff.GetTestServer().CreateClient()
+            .GetAsync("/api/orders", TestContext.Current.CancellationToken);
+
+        anonymousResponse.EnsureSuccessStatusCode();
+        var anonymousRecorded = Assert.Single(anonymousBackend.RecordedCalls);
+        Assert.False(anonymousRecorded.Request.UseTokenExchange);
+        Assert.Null(anonymousRecorded.Request.AccessToken);
+    }
+
+    [Fact]
+    public async Task AllowAnonymousWithOptionalAuth_PolicyPassed_GetsAuthenticatedTreatment()
+    {
+        // AllowAnonymousWithOptionalAuth(policy): the authenticated treatment is gated on the
+        // authorization policy, evaluated against HttpContext.User (hence the stub scheme).
+        var backend = new MockBackendCaller()
+            .SetupResponse("https://backend.test/maybe", new EchoResponse { Echoed = "ok" });
+        using var bff = await CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/maybe")
+            .ToBackend("GET", "https://backend.test/maybe")
+            .WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)
+            .AllowAnonymousWithOptionalAuth("KnownUser")
+            .Build(), backend, authenticated: true, withStubAuthScheme: true,
+            configureAuthorization: options => options.AddPolicy(
+                "KnownUser", p => p.RequireClaim(ClaimTypes.NameIdentifier)));
+
+        var response = await bff.GetTestServer().CreateClient()
+            .GetAsync("/api/maybe", TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        var recorded = Assert.Single(backend.RecordedCalls);
+        Assert.Equal(BackendAuthPolicies.BearerToken, recorded.Request.BackendAuthPolicy);
+        Assert.Equal("user-access-token", recorded.Request.AccessToken);
+    }
+
+    [Fact]
+    public async Task AllowAnonymousWithOptionalAuth_PolicyFailed_ServedAnonymousView()
+    {
+        // A credentialed caller that fails the policy is downgraded to the anonymous view, not
+        // 403'd: anonymous access is allowed anyway, so a failing credential only removes
+        // privilege - it must never make the caller worse off than sending no credential.
+        var backend = new MockBackendCaller()
+            .SetupResponse("https://backend.test/maybe", new EchoResponse { Echoed = "ok" });
+        var transformer = new RecordingTransformer();
+        using var bff = await CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/maybe")
+            .ToBackend("GET", "https://backend.test/maybe")
+            .WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)
+            .AllowAnonymousWithOptionalAuth("AdminOnly")
+            .Build(), backend, transformer: transformer, authenticated: true, withStubAuthScheme: true,
+            configureAuthorization: options => options.AddPolicy(
+                "AdminOnly", p => p.RequireClaim("admin")));
+
+        var response = await bff.GetTestServer().CreateClient()
+            .GetAsync("/api/maybe", TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        var recorded = Assert.Single(backend.RecordedCalls);
+        Assert.Equal(BackendAuthPolicies.None, recorded.Request.BackendAuthPolicy);
+        Assert.Null(recorded.Request.AccessToken);
+        Assert.NotNull(transformer.LastAuthContext);
+        Assert.False(transformer.LastAuthContext!.IsAuthenticated);
+    }
+
+    [Fact]
+    public async Task AllowAnonymous_BearerTokenBackend_FailsAtStartup()
+    {
+        // Plain AllowAnonymous() must keep rejecting user-identity backend policies at startup:
+        // the endpoint never guarantees a token, and the caller did not opt into the
+        // downgrade-to-None behavior of AllowAnonymousWithOptionalAuth().
+        var backend = new MockBackendCaller();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/anon")
+            .ToBackend("GET", "https://backend.test/anon")
+            .WithBackendAuth(BackendAuthPolicies.BearerToken)
+            .AllowAnonymous()
+            .Build(), backend));
+
+        Assert.Contains("AllowAnonymousWithOptionalAuth", ex.Message);
+    }
+
+    [Fact]
+    public async Task AllowAnonymousWithOptionalAuth_MandatoryIdentityBackend_FailsAtStartup()
+    {
+        // A NON-optional user-identity policy promises the backend an identity that anonymous
+        // callers do not have. The optional endpoint must not silently downgrade a mandatory
+        // promise - the policy has to be declared optional explicitly.
+        var backend = new MockBackendCaller();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/maybe")
+            .ToBackend("GET", "https://backend.test/maybe")
+            .WithBackendAuth(BackendAuthPolicies.BearerToken)
+            .AllowAnonymousWithOptionalAuth()
+            .Build(), backend));
+
+        Assert.Contains("optional: true", ex.Message);
+    }
+
+    [Fact]
+    public async Task OptionalBackendAuth_OnRequireAuthEndpoint_FailsAtStartup()
+    {
+        // optional: true on a RequireAuth endpoint is dead configuration - identity is always
+        // present, so the flag can never change behavior. Fail loud instead of misleading readers.
+        var backend = new MockBackendCaller();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/orders")
+            .ToBackend("GET", "https://backend.test/orders")
+            .WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)
+            .RequireAuth()
+            .Build(), backend, withStubAuthScheme: true));
+
+        Assert.Contains("AllowAnonymousWithOptionalAuth", ex.Message);
+    }
+
+    [Fact]
+    public async Task OptionalBackendAuth_OnNonIdentityPolicy_FailsAtStartup()
+    {
+        // BasicAuth uses the BFF's own credentials - there is no caller identity to apply
+        // optionally, so the flag is a misconfiguration.
+        var backend = new MockBackendCaller();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/things")
+            .ToBackend("GET", "https://backend.test/things")
+            .WithBackendAuth(BackendAuthPolicies.BasicAuth, optional: true)
+            .AllowAnonymousWithOptionalAuth()
+            .Build(), backend));
+
+        Assert.Contains("never carries", ex.Message);
+    }
+
+    [Fact]
+    public async Task AllowAnonymous_IsCredentialBlind_EvenWhenCredentialsPresent()
+    {
+        // AllowAnonymous() endpoints never resolve credentials: the transformer always sees an
+        // empty AuthContext, even when the caller sent valid credentials (data minimization - an
+        // endpoint declared anonymous never handles tokens). Use AllowAnonymousWithOptionalAuth()
+        // to personalize opportunistically.
         var backend = new MockBackendCaller()
             .SetupResponse("https://backend.test/open", new EchoResponse { Echoed = "ok" });
         var transformer = new RecordingTransformer();
@@ -196,17 +421,16 @@ public sealed class TransformerEndpointBuilderFluentTests
 
         response.EnsureSuccessStatusCode();
         Assert.NotNull(transformer.LastAuthContext);
-        Assert.True(transformer.LastAuthContext!.IsAuthenticated);
+        Assert.False(transformer.LastAuthContext!.IsAuthenticated);
+        var recorded = Assert.Single(backend.RecordedCalls);
+        Assert.Null(recorded.Request.AccessToken);
     }
 
     [Fact]
-    public async Task AllowAnonymous_ThrowingAuthProvider_DegradesToAnonymous_InsteadOf500()
+    public async Task AllowAnonymous_ThrowingAuthProvider_StillServesRequest()
     {
-        // L14 regression: endpoints that don't enforce identity resolve the auth context via
-        // TryGetAuthContextAsync (matching raw forward). A custom provider that throws on a
-        // missing/invalid credential must degrade the request to anonymous - previously the
-        // typed builder used required-mode resolution here, so every such hit became a 500
-        // (and an anonymous hit was counted as an authentication failure).
+        // AllowAnonymous() is credential-blind, so a provider that throws on missing/invalid
+        // credentials can never fail the request - it is not even consulted.
         var backend = new MockBackendCaller()
             .SetupResponse("https://backend.test/open", new EchoResponse { Echoed = "ok" });
         var transformer = new RecordingTransformer();
@@ -215,6 +439,30 @@ public sealed class TransformerEndpointBuilderFluentTests
             .FromGet("/api/open")
             .ToBackend("GET", "https://backend.test/open")
             .AllowAnonymous()
+            .Build(), backend, transformer: transformer, authProvider: new ThrowingAuthProvider());
+
+        var client = bff.GetTestServer().CreateClient();
+        var response = await client.GetAsync("/api/open", TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        Assert.NotNull(transformer.LastAuthContext);
+        Assert.False(transformer.LastAuthContext!.IsAuthenticated);
+    }
+
+    [Fact]
+    public async Task AllowAnonymousWithOptionalAuth_ThrowingAuthProvider_DegradesToAnonymous_InsteadOf500()
+    {
+        // The optional rung resolves via TryGetAuthContextAsync: a custom provider that throws on
+        // a missing/invalid credential must degrade the request to anonymous, not 500 it (and an
+        // anonymous hit must not be counted as an authentication failure).
+        var backend = new MockBackendCaller()
+            .SetupResponse("https://backend.test/open", new EchoResponse { Echoed = "ok" });
+        var transformer = new RecordingTransformer();
+        using var bff = await CreateBffAsync(endpoints => endpoints
+            .MapTransformer<RecordingTransformer, EchoResponse>()
+            .FromGet("/api/open")
+            .ToBackend("GET", "https://backend.test/open")
+            .AllowAnonymousWithOptionalAuth()
             .Build(), backend, transformer: transformer, authProvider: new ThrowingAuthProvider());
 
         var client = bff.GetTestServer().CreateClient();
@@ -643,7 +891,8 @@ public sealed class TransformerEndpointBuilderFluentTests
         RecordingTransformer? transformer = null,
         bool authenticated = false,
         bool withStubAuthScheme = false,
-        IAuthenticationProvider? authProvider = null)
+        IAuthenticationProvider? authProvider = null,
+        Action<Microsoft.AspNetCore.Authorization.AuthorizationOptions>? configureAuthorization = null)
     {
         transformer ??= new RecordingTransformer();
         var hostBuilder = new HostBuilder()
@@ -658,7 +907,7 @@ public sealed class TransformerEndpointBuilderFluentTests
                         services.AddAuthentication(StubAuthHandler.SchemeName)
                             .AddScheme<AuthenticationSchemeOptions, StubAuthHandler>(StubAuthHandler.SchemeName, _ => { });
                     }
-                    services.AddAuthorization();
+                    services.AddAuthorization(configureAuthorization ?? (_ => { }));
                     if (authProvider is not null)
                     {
                         services.AddSingleton(authProvider);

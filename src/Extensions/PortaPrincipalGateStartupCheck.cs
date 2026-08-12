@@ -17,8 +17,9 @@ namespace b17s.Porta.Extensions;
 /// </summary>
 /// <remarks>
 /// This logs at <see cref="LogLevel.Critical"/> rather than throwing: an endpoint that authenticates
-/// via an in-pipeline <c>IAuthenticationProvider</c> and is correctly marked <c>.AllowAnonymous()</c>
-/// stamps "does not require a principal" and is not counted, so the check is precise - but a consumer
+/// via an in-pipeline <c>IAuthenticationProvider</c> and is correctly marked
+/// <c>.AllowAnonymousWithOptionalAuth()</c> stamps "does not require a principal" and is not counted,
+/// so the check is precise - but a consumer
 /// may still have an intentional reason for a scheme-less host, and failing the boot outright would be
 /// heavier-handed than the fail-fast HttpClient/HA checks that guard unambiguous misconfigurations.
 /// <para/>
@@ -64,7 +65,8 @@ internal static partial class PortaPrincipalGateStartupCheckLogging
                   "ASP.NET Core authentication scheme is registered to populate HttpContext.User - those " +
                   "endpoints will reject every request with 401. Register a scheme (AddPortaAuthentication, " +
                   "AddPortaJwtAuthentication, or AddPortaReferenceTokenScheme); or, for an in-pipeline " +
-                  "IAuthenticationProvider (e.g. a custom API key), mark those endpoints .AllowAnonymous() " +
-                  "(or set RequireAuthorizationByDefault = false) and enforce identity in the transformer.")]
+                  "IAuthenticationProvider (e.g. a custom API key), mark those endpoints " +
+                  ".AllowAnonymousWithOptionalAuth() and enforce identity in the transformer " +
+                  "(plain .AllowAnonymous() is credential-blind and never consults the provider).")]
     public static partial void NoAuthenticationSchemeForPrincipalGate(this ILogger logger);
 }

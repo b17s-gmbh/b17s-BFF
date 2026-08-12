@@ -21,8 +21,10 @@ namespace b17s.Porta.Tests.Integration;
 /// Because reference-token requests carry no cookie, the ASP.NET principal is never populated, so the
 /// endpoint can't gate on it (<c>RequireAuth()</c> would 401 before introspection runs - and forwarding
 /// the inbound token via a <c>BearerToken</c> policy, which requires that principal, is therefore not
-/// applicable to the opaque-token path). The endpoint is instead mapped <c>AllowAnonymous()</c> with a
-/// <c>None</c> backend policy (so no credential is forwarded), and gated by a transformer whose
+/// applicable to the opaque-token path). The endpoint is instead mapped
+/// <c>AllowAnonymousWithOptionalAuth()</c> - the middle rung that resolves credentials when present
+/// (plain <c>AllowAnonymous()</c> is credential-blind and would never introspect) - with a <c>None</c>
+/// backend policy (so no credential is forwarded), and gated by a transformer whose
 /// <c>RequiresAuthentication</c> is true - it returns 401 when the introspected <c>sub</c> is absent.
 /// </para>
 /// </summary>
@@ -130,9 +132,11 @@ public sealed class ReferenceTokenE2ETests
     }
 
     // Standard reference-token host: introspection wired to the FakeIdp, a single pass-through
-    // endpoint with a None backend policy, gated by an auth-requiring transformer. AllowAnonymous()
-    // at the routing layer (no ASP.NET principal exists for reference tokens); the transformer's
-    // RequiresAuthentication gate is the real check, keyed on the introspected sub.
+    // endpoint with a None backend policy, gated by an auth-requiring transformer.
+    // AllowAnonymousWithOptionalAuth() at the routing layer (no ASP.NET principal exists for
+    // reference tokens, and plain AllowAnonymous() is credential-blind - it would never run
+    // introspection); the transformer's RequiresAuthentication gate is the real check, keyed on
+    // the introspected sub.
     private static Task<IHost> StartAsync(FakeIdp idp, FakeBackend backend) =>
         new PortaTestHost()
             .WithReferenceToken(idp)
@@ -142,7 +146,7 @@ public sealed class ReferenceTokenE2ETests
                 .MapTransformer<AuthGatedPassThrough, BackendPayload>()
                 .FromGet("/api/data")
                 .ToBackend("GET", $"{BackendBase}/data")
-                .AllowAnonymous()
+                .AllowAnonymousWithOptionalAuth()
                 .Build())
             .StartAsync();
 

@@ -60,6 +60,30 @@ public sealed class PortaCoreOptions
     public bool RefreshBackendTokenOn401 { get; set; } = true;
 
     /// <summary>
+    /// Whether a successful token refresh also updates the session (cookie) principal's claims
+    /// from the NEW <c>id_token</c>, when the IdP returns one with the refresh response. Enabled
+    /// by default; set to <c>false</c> to keep the login-time claims for the whole session.
+    /// <para>
+    /// Semantics: for every claim type present in the new <c>id_token</c>, the session's claims of
+    /// that type are replaced with the new values (multi-value types like roles are replaced as a
+    /// set, so revoked values disappear). Claim types the new <c>id_token</c> does not carry are
+    /// left untouched - IdPs commonly issue leaner id_tokens on refresh than at login, and
+    /// treating absence as revocation would silently strip login-only claims. OIDC protocol and
+    /// login-time claims (<c>iss</c>, <c>aud</c>, <c>nonce</c>, <c>auth_time</c>, <c>amr</c>, ...)
+    /// are never copied.
+    /// </para>
+    /// <para>
+    /// The new <c>id_token</c>'s <c>iss</c> and <c>sub</c> must match the session's previous
+    /// <c>id_token</c> (OIDC Core §12.2); on mismatch - or when the token cannot be parsed - the
+    /// claims update is skipped with a warning and the refresh proceeds with the existing
+    /// principal. The signature is not re-validated: the token arrived over the BFF's own
+    /// client-authenticated TLS channel to the token endpoint, the same trust that accepts the
+    /// rotated access token.
+    /// </para>
+    /// </summary>
+    public bool RefreshClaimsFromIdToken { get; set; } = true;
+
+    /// <summary>
     /// Whether transformer endpoints require authorization by default.
     /// When true (default), endpoints require authentication unless explicitly marked with AllowAnonymous().
     /// When false, endpoints allow anonymous access unless explicitly marked with RequireAuth().

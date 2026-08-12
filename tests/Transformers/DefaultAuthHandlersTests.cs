@@ -14,7 +14,7 @@ using Microsoft.Extensions.Options;
 namespace b17s.Porta.Tests.Transformers;
 
 /// <summary>
-/// Unit tests for the four built-in <see cref="IBackendAuthHandler"/> implementations.
+/// Unit tests for the six built-in <see cref="IBackendAuthHandler"/> implementations.
 /// These handlers sit on the security-critical path between the BFF and every backend,
 /// so each branch — including the "no credentials configured" fallbacks — needs explicit
 /// coverage to lock in fail-safe behavior.
@@ -262,6 +262,346 @@ public sealed class DefaultAuthHandlersTests
 
             var expected = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
             Assert.Equal(expected, request.Headers.Authorization.Parameter);
+        }
+    }
+
+    public sealed class ApiKey
+    {
+        private static ApiKeyAuthHandler Handler(BackendServiceOptions options, ILogger<ApiKeyAuthHandler>? logger = null)
+            => new(Options.Create(options), logger ?? NullLogger<ApiKeyAuthHandler>.Instance);
+
+        [Fact]
+        public void PolicyName_IsApiKey() =>
+            Assert.Equal(BackendAuthPolicies.ApiKey, Handler(new BackendServiceOptions()).PolicyName);
+
+        [Fact]
+        public async Task DefaultOptions_SendBearerAuthorization()
+        {
+            var handler = Handler(new BackendServiceOptions
+            {
+                ApiKey = new ApiKeyOptions { Token = "s3cret" },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context());
+
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+            Assert.Equal("s3cret", request.Headers.Authorization.Parameter);
+        }
+
+        [Fact]
+        public async Task CustomScheme_SendsConfiguredScheme()
+        {
+            var handler = Handler(new BackendServiceOptions
+            {
+                ApiKey = new ApiKeyOptions { Token = "s3cret", Scheme = "Token" },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context());
+
+            Assert.Equal("Token", request.Headers.Authorization!.Scheme);
+            Assert.Equal("s3cret", request.Headers.Authorization.Parameter);
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("   ")]
+        public async Task BlankScheme_FallsBackToBearer(string scheme)
+        {
+            // A config entry that clears the scheme must not produce a malformed header.
+            var handler = Handler(new BackendServiceOptions
+            {
+                ApiKey = new ApiKeyOptions { Token = "s3cret", Scheme = scheme },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context());
+
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+        }
+
+        [Fact]
+        public async Task HeaderName_SendsRawCustomHeader_InsteadOfAuthorization()
+        {
+            var handler = Handler(new BackendServiceOptions
+            {
+                ApiKey = new ApiKeyOptions { Token = "s3cret", HeaderName = "X-Api-Key" },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context());
+
+            Assert.Null(request.Headers.Authorization);
+            Assert.Equal("s3cret", Assert.Single(request.Headers.GetValues("X-Api-Key")));
+        }
+
+        [Fact]
+        public async Task HeaderName_ReplacesPreexistingHeader_NeverAppends()
+        {
+            // A client-forwarded header of the same name must not ride alongside the configured
+            // key - the backend would see two values and might honour the attacker-controlled one.
+            var handler = Handler(new BackendServiceOptions
+            {
+                ApiKey = new ApiKeyOptions { Token = "s3cret", HeaderName = "X-Api-Key" },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+            request.Headers.TryAddWithoutValidation("X-Api-Key", "client-smuggled");
+
+            await handler.ApplyAuthAsync(request, Context());
+
+            Assert.Equal("s3cret", Assert.Single(request.Headers.GetValues("X-Api-Key")));
+        }
+
+        [Fact]
+        public async Task PerBackendKey_OverridesDefault_WhenBackendNameMatches()
+        {
+            var handler = Handler(new BackendServiceOptions
+            {
+                ApiKey = new ApiKeyOptions { Token = "global" },
+                ApiKeys = { ["orders"] = new ApiKeyOptions { Token = "orders-key", Scheme = "ApiKey" } },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context(backendName: "orders"));
+
+            Assert.Equal("ApiKey", request.Headers.Authorization!.Scheme);
+            Assert.Equal("orders-key", request.Headers.Authorization.Parameter);
+        }
+
+        [Fact]
+        public async Task UnknownBackendName_FailsClosed_DoesNotLeakGlobalDefault()
+        {
+            var handler = Handler(new BackendServiceOptions
+            {
+                ApiKey = new ApiKeyOptions { Token = "global" },
+                ApiKeys = { ["orders"] = new ApiKeyOptions { Token = "orders-key" } },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context(backendName: "unknown"));
+
+            Assert.Null(request.Headers.Authorization);
+        }
+
+        [Fact]
+        public async Task UnknownBackendName_WithFallbackOptIn_UsesGlobalDefault()
+        {
+            var handler = Handler(new BackendServiceOptions
+            {
+                AllowGlobalApiKeyFallback = true,
+                ApiKey = new ApiKeyOptions { Token = "global" },
+                ApiKeys = { ["orders"] = new ApiKeyOptions { Token = "orders-key" } },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context(backendName: "unknown"));
+
+            Assert.Equal("global", request.Headers.Authorization!.Parameter);
+        }
+
+        [Fact]
+        public async Task PerBackendWithEmptyToken_FailsClosed()
+        {
+            // A placeholder per-backend entry (no token) is not authoritative; with a backend
+            // name present it must not fall through to the global key.
+            var handler = Handler(new BackendServiceOptions
+            {
+                ApiKey = new ApiKeyOptions { Token = "global" },
+                ApiKeys = { ["orders"] = new ApiKeyOptions { Token = "" } },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context(backendName: "orders"));
+
+            Assert.Null(request.Headers.Authorization);
+        }
+
+        [Fact]
+        public async Task NoTokenConfigured_LeavesHeaderUnset_AndWarns()
+        {
+            // Same fail-closed motivation as BearerToken/BasicAuth: an empty Bearer value is a
+            // valid header some backends treat as anonymous.
+            var capture = new ListLogger<ApiKeyAuthHandler>();
+            var handler = Handler(new BackendServiceOptions(), capture);
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context());
+
+            Assert.Null(request.Headers.Authorization);
+            Assert.Contains(capture.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("no token"));
+        }
+    }
+
+    public sealed class ClientCredentials
+    {
+        private static ClientCredentialsAuthHandler Handler(
+            BackendServiceOptions options,
+            FakeClientCredentialsTokenService? tokenService = null)
+            => new(
+                Options.Create(options),
+                tokenService ?? new FakeClientCredentialsTokenService(),
+                NullLogger<ClientCredentialsAuthHandler>.Instance);
+
+        private static BackendServiceOptions OptionsWithGlobal(string? scope = null, string? audience = null) => new()
+        {
+            ClientCredentials = new ClientCredentialsOptions
+            {
+                TokenEndpoint = "https://idp.test/connect/token",
+                ClientId = "bff-m2m",
+                ClientSecret = "s3cret",
+                Scope = scope,
+                Audience = audience,
+            },
+        };
+
+        [Fact]
+        public void PolicyName_IsClientCredentials() =>
+            Assert.Equal(BackendAuthPolicies.ClientCredentials, Handler(new BackendServiceOptions()).PolicyName);
+
+        [Fact]
+        public async Task GlobalConfig_MintsToken_AndSendsBearer()
+        {
+            var tokenService = new FakeClientCredentialsTokenService(token: "minted-token");
+            var handler = Handler(OptionsWithGlobal(scope: "orders.read", audience: "orders-api"), tokenService);
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context());
+
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+            Assert.Equal("minted-token", request.Headers.Authorization.Parameter);
+            Assert.Equal("https://idp.test/connect/token", tokenService.LastRequest!.TokenEndpoint);
+            Assert.Equal("bff-m2m", tokenService.LastRequest.ClientId);
+            Assert.Equal("s3cret", tokenService.LastRequest.ClientSecret);
+            Assert.Equal("orders.read", tokenService.LastRequest.Scope);
+            Assert.Equal("orders-api", tokenService.LastRequest.Audience);
+        }
+
+        [Theory]
+        [InlineData(null, "id", "secret", "TokenEndpoint")]
+        [InlineData("https://idp.test/token", null, "secret", "ClientId")]
+        [InlineData("https://idp.test/token", "id", null, "ClientSecret")]
+        public async Task IncompleteConfig_ThrowsConfigurationError(
+            string? endpoint, string? clientId, string? clientSecret, string expectedMissing)
+        {
+            // Missing client-credentials config is operator misconfiguration (5xx-class), never a
+            // user credential rejection - and the message names exactly what is missing.
+            var handler = Handler(new BackendServiceOptions
+            {
+                ClientCredentials = new ClientCredentialsOptions
+                {
+                    TokenEndpoint = endpoint ?? "",
+                    ClientId = clientId ?? "",
+                    ClientSecret = clientSecret ?? "",
+                },
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            var ex = await Assert.ThrowsAsync<BackendAuthConfigurationException>(
+                () => handler.ApplyAuthAsync(request, Context()));
+
+            Assert.Contains(expectedMissing, ex.Message);
+            Assert.Null(request.Headers.Authorization);
+        }
+
+        [Fact]
+        public async Task PerBackendConfig_OverridesGlobal_WhenBackendNameMatches()
+        {
+            var tokenService = new FakeClientCredentialsTokenService();
+            var options = OptionsWithGlobal();
+            options.ClientCredentialsBackends["orders"] = new ClientCredentialsOptions
+            {
+                TokenEndpoint = "https://idp.test/connect/token",
+                ClientId = "orders-m2m",
+                ClientSecret = "orders-secret",
+                Scope = "orders.write",
+            };
+            var handler = Handler(options, tokenService);
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context(backendName: "orders"));
+
+            Assert.Equal("orders-m2m", tokenService.LastRequest!.ClientId);
+            Assert.Equal("orders.write", tokenService.LastRequest.Scope);
+        }
+
+        [Fact]
+        public async Task UnknownBackendName_FailsClosed_AsConfigurationError()
+        {
+            // The global client's scopes may grant more than this backend should receive -
+            // and unlike BasicAuth/ApiKey the failure is loud (the call cannot succeed anyway).
+            var handler = Handler(OptionsWithGlobal());
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            var ex = await Assert.ThrowsAsync<BackendAuthConfigurationException>(
+                () => handler.ApplyAuthAsync(request, Context(backendName: "unknown")));
+
+            Assert.Contains("AllowGlobalClientCredentialsFallback", ex.Message);
+            Assert.Null(request.Headers.Authorization);
+        }
+
+        [Fact]
+        public async Task UnknownBackendName_WithFallbackOptIn_UsesGlobalDefault()
+        {
+            var tokenService = new FakeClientCredentialsTokenService();
+            var options = OptionsWithGlobal();
+            options.AllowGlobalClientCredentialsFallback = true;
+            var handler = Handler(options, tokenService);
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await handler.ApplyAuthAsync(request, Context(backendName: "unknown"));
+
+            Assert.Equal("bff-m2m", tokenService.LastRequest!.ClientId);
+            Assert.NotNull(request.Headers.Authorization);
+        }
+
+        [Fact]
+        public async Task ForceFreshCredential_IsPassedThrough_ToTokenService()
+        {
+            // BackendCaller's mint-fresh-on-401 retry sets ForceFreshCredential; the handler must
+            // forward it so the token cache is bypassed on exactly that attempt.
+            var tokenService = new FakeClientCredentialsTokenService();
+            var handler = Handler(OptionsWithGlobal(), tokenService);
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+            var context = new BackendAuthContext
+            {
+                BackendRequest = new BackendRequest { Method = "GET", Url = "https://backend.test/resource" },
+                ForceFreshCredential = true,
+                CancellationToken = TestContext.Current.CancellationToken,
+            };
+
+            await handler.ApplyAuthAsync(request, context);
+
+            Assert.True(tokenService.LastForceRefresh);
+        }
+
+        [Fact]
+        public async Task TokenAcquisitionFailure_Propagates_AndLeavesHeaderUnset()
+        {
+            // Fail closed: an IdP failure must not send an unauthenticated request downstream.
+            var tokenService = new FakeClientCredentialsTokenService(
+                onCall: _ => throw new InvalidOperationException("Client-credentials token request failed: 500"));
+            var handler = Handler(OptionsWithGlobal(), tokenService);
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://backend.test/resource");
+
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => handler.ApplyAuthAsync(request, Context()));
+            Assert.Null(request.Headers.Authorization);
+        }
+
+        private sealed class FakeClientCredentialsTokenService(
+            string token = "fake-token",
+            Func<ClientCredentialsTokenRequest, string>? onCall = null) : IClientCredentialsTokenService
+        {
+            public ClientCredentialsTokenRequest? LastRequest { get; private set; }
+            public bool LastForceRefresh { get; private set; }
+
+            public Task<string> GetTokenAsync(ClientCredentialsTokenRequest request, bool forceRefresh = false, CancellationToken cancellationToken = default)
+            {
+                LastRequest = request;
+                LastForceRefresh = forceRefresh;
+                return Task.FromResult(onCall?.Invoke(request) ?? token);
+            }
         }
     }
 

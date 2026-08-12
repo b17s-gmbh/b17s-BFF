@@ -507,7 +507,9 @@ public sealed class BackendCaller(
 
         // Apply backend authentication based on policy. Raw forward does not participate in the
         // refresh-on-401 retry path, so the captured access token is used as-is.
-        var authResult = await ApplyBackendAuthAsync(httpRequest, request, request.AccessToken, activity, stopwatch, serviceName, cancellationToken);
+        var authResult = await ApplyBackendAuthAsync(
+            httpRequest, request, request.AccessToken, forceFreshCredential: false,
+            activity, stopwatch, serviceName, cancellationToken);
         if (authResult != null)
         {
             return authResult.Value;
@@ -588,6 +590,7 @@ public sealed class BackendCaller(
         HttpRequestMessage httpRequest,
         BackendRequest request,
         string? accessToken,
+        bool forceFreshCredential,
         Activity? activity,
         Stopwatch stopwatch,
         string serviceName,
@@ -646,7 +649,8 @@ public sealed class BackendCaller(
                 // Thread the request's cancellation through. Token-exchange handlers do an STS
                 // round-trip here; with CancellationToken.None a hung token endpoint ignored the
                 // request deadline entirely.
-                CancellationToken = cancellationToken
+                CancellationToken = cancellationToken,
+                ForceFreshCredential = forceFreshCredential
             };
 
             try
@@ -782,7 +786,41 @@ public sealed class BackendCaller(
             return await SendWithRefreshOn401Async(request, body, httpContext, cancellationToken);
         }
 
+        // Mint-fresh-on-401 for the BFF's own client-credentials identity (same opt-out flag).
+        // The cached M2M token may have been revoked or its signing keys rotated; the retry runs
+        // the auth handler with ForceFreshCredential so it bypasses the token cache. No user
+        // session is involved, so this needs neither a refresh service nor an HttpContext.
+        if (_refreshOn401Enabled
+            && string.Equals(ResolveEffectivePolicy(request), BackendAuthPolicies.ClientCredentials, StringComparison.Ordinal))
+        {
+            return await SendWithClientCredentialsRetryOn401Async(request, body, cancellationToken);
+        }
+
         return await AttemptSendAsync(request, body, request.AccessToken, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends once; on a raw backend <c>401</c> retries exactly once with
+    /// <see cref="BackendAuthContext.ForceFreshCredential"/> set, so the ClientCredentials handler
+    /// discards its cached token and mints a fresh one. A second <c>401</c> is surfaced unchanged -
+    /// the fresh token being rejected means the problem is not staleness.
+    /// </summary>
+    private async Task<SendResult> SendWithClientCredentialsRetryOn401Async<TRequest>(
+        BackendRequest request,
+        TRequest? body,
+        CancellationToken cancellationToken)
+    {
+        var result = await AttemptSendAsync(request, body, request.AccessToken, cancellationToken);
+
+        if (!IsRawUnauthorized(result))
+        {
+            return result;
+        }
+
+        // The first 401 response is no longer needed; release it before re-sending.
+        result.Response?.Dispose();
+        logger.BackendMintingFreshClientCredentialsOn401(request.Method, SanitizeUrl(request.Url));
+        return await AttemptSendAsync(request, body, request.AccessToken, cancellationToken, isRefreshRetry: true);
     }
 
     /// <summary>
@@ -934,8 +972,11 @@ public sealed class BackendCaller(
             }
         }
 
-        // Apply backend authentication using the auth handler registry
-        var authResult = await ApplyBackendAuthAsync(httpRequest, request, accessToken, activity, stopwatch, serviceName, cancellationToken);
+        // Apply backend authentication using the auth handler registry. A refresh retry also
+        // flags ForceFreshCredential so self-caching handlers (ClientCredentials) re-mint.
+        var authResult = await ApplyBackendAuthAsync(
+            httpRequest, request, accessToken, forceFreshCredential: isRefreshRetry,
+            activity, stopwatch, serviceName, cancellationToken);
         if (authResult != null)
         {
             return authResult.Value;
@@ -1294,4 +1335,8 @@ internal static partial class BackendCallerLogging
     [LoggerMessage(EventId = 14011, Level = LogLevel.Debug,
         Message = "Backend returned 401; refreshing user token and retrying once: {Method} {Url}")]
     public static partial void BackendRefreshingOn401(this ILogger logger, string method, string url);
+
+    [LoggerMessage(EventId = 14012, Level = LogLevel.Debug,
+        Message = "Backend returned 401; minting fresh client-credentials token and retrying once: {Method} {Url}")]
+    public static partial void BackendMintingFreshClientCredentialsOn401(this ILogger logger, string method, string url);
 }

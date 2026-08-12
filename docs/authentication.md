@@ -260,17 +260,17 @@ So whether the gate and the provider line up depends on how your auth is registe
 
 For the two ❌ rows the provider authenticates **in-pipeline only**, so the default identity gate short-circuits with `401` before the provider is consulted — even when the request carries a perfectly valid token. (Porta logs a `Critical` startup warning when an endpoint requires a principal but no scheme is registered, so this doesn't stay silent.) You have two ways to fix it:
 
-**Option A — drop the gate, authenticate in-pipeline.** Mark the endpoints `.AllowAnonymous()` (or set `RequireAuthorizationByDefault = false`) so the request reaches the handler and your provider runs and populates `AuthContext` for the backend call:
+**Option A — drop the gate, authenticate in-pipeline.** Mark the endpoints `.AllowAnonymousWithOptionalAuth()` so the request reaches the handler and your provider runs and populates `AuthContext` for the backend call:
 
 ```csharp
 app.MapPassThrough<DataResponse>()
     .FromGet("/api/data")
     .ToGet("https://api.internal/data")
-    .AllowAnonymous()            // skip the ASP.NET identity gate; the provider runs in-pipeline
+    .AllowAnonymousWithOptionalAuth()   // skip the ASP.NET identity gate; the provider runs in-pipeline
     .Build();
 ```
 
-`.AllowAnonymous()` here means "no ASP.NET principal required", **not** "no auth" — the provider still resolves credentials for the backend. If you also need to *reject* anonymous callers, enforce it in-pipeline: a transformer whose `RequiresAuthentication` returns `true` 401s when `context.UserId` (i.e. the provider's `AuthContext`) is empty. A zero-code `MapPassThrough` does **not** do this, so don't rely on `.AllowAnonymous()` alone to protect a passthrough.
+`.AllowAnonymousWithOptionalAuth()` means "no ASP.NET principal required", **not** "no auth" — the provider still resolves credentials for the transformer and (with an `optional: true` backend policy) the backend call. Plain `.AllowAnonymous()` will **not** work here: it is credential-blind — the provider is never consulted and `AuthContext` stays empty. If you also need to *reject* anonymous callers, enforce it in-pipeline: a transformer whose `RequiresAuthentication` returns `true` 401s when `context.UserId` (i.e. the provider's `AuthContext`) is empty. A zero-code `MapPassThrough` does **not** do this, so don't rely on the endpoint mode alone to protect a passthrough.
 
 **Option B — register a real scheme (recommended when you want `RequireAuthorization` to work).** A scheme populates `HttpContext.User`, so the identity gate passes normally, your `IAuthenticationProvider` reads the already-validated principal/token for backend forwarding, and `.RequireAuth("policy")`, fallback policies, and group conventions all behave as a vanilla ASP.NET app expects.
 
@@ -371,6 +371,8 @@ Backend auth handlers apply authentication to outgoing requests to backend servi
 |--------|-------------|------------------------|
 | `None` | No authentication | No |
 | `BasicAuth` | HTTP Basic auth with configured credentials | No |
+| `ApiKey` | Fixed API key from configuration. Default `Authorization: Bearer <token>`; the scheme is configurable (`Scheme`), or send the raw key in a custom header (`HeaderName`, e.g. `X-Api-Key`). Per-backend keys via `BackendService:ApiKeys`, fail-closed like BasicAuth. | No |
+| `ClientCredentials` | OAuth2 client-credentials grant (RFC 6749 §4.4): the BFF mints an access token for its **own** machine-to-machine identity and sends it as a Bearer credential. Configured under `BackendService:ClientCredentials` (`TokenEndpoint`, `ClientId`, `ClientSecret` required; optional `Scope`/`Audience`) — deliberately separate from `SessionAuthentication`. Tokens are cached process-wide until 60s before expiry; failures are never cached. Per-backend clients via `BackendService:ClientCredentialsBackends`, fail-closed (as a 5xx-class config error) unless `AllowGlobalClientCredentialsFallback` is set. | No |
 | `BearerToken` | Forward user's bearer token | Yes |
 | `TokenExchange` | Exchange user token for backend-specific token (RFC 8693) - requires an audience | Yes |
 
@@ -381,6 +383,21 @@ The built-in `TokenExchange` handler inherits the rest of its wiring from your s
 ### Refreshing the user token on a backend 401
 
 When a backend returns `401` on a user-token policy, Porta treats it as a stale-token signal: it force-refreshes the user's session access token against the IdP and retries the call **once** with the rotated token. This is **on by default** - opt out globally with `PortaCore:RefreshBackendTokenOn401 = false`.
+
+The `ClientCredentials` policy has the analogous behavior under the same flag: on a backend `401` the cached machine-to-machine token is discarded and the call retried **once** with a freshly minted token (covers revoked tokens and rotated signing keys). A second `401` surfaces unchanged - a fresh token being rejected means the problem is not staleness. `BasicAuth`/`ApiKey`/`None` are never retried; re-minting cannot fix static credentials.
+
+### Claims refresh on token refresh
+
+Every successful token refresh also updates the session (cookie) principal's **claims** from the new `id_token`, when the IdP returns one with the refresh response - so IdP-side changes (roles granted or revoked, renamed users) propagate to the BFF without a re-login. On by default; opt out with `PortaCore:RefreshClaimsFromIdToken = false` to keep login-time claims for the whole session.
+
+Semantics:
+
+- For every claim **type** the new `id_token` carries, the session's claims of that type are replaced with the new values - multi-value types (roles) are replaced as a set, so revoked values disappear.
+- Types the new `id_token` does **not** carry stay untouched: IdPs commonly issue leaner id_tokens on refresh than at login, and treating absence as revocation would silently strip login-only claims. To *revoke* a claim, the IdP must re-assert the type with the remaining values (an empty set cannot be expressed; model "no roles" as a role claim with a sentinel or opt for short session lifetimes).
+- OIDC protocol and login-time claims (`iss`, `aud`, `nonce`, `auth_time`, `amr`, `acr`, `sid`, ...) are never copied. Principals built with ASP.NET's default inbound claim mapping are handled - a raw `role` in the id_token updates the mapped `ClaimTypes.Role` the cookie actually carries.
+- Per OIDC Core §12.2 the new id_token's `iss` and `sub` must match the session's previous id_token (falling back to the principal's subject). On mismatch - or an unparsable token - the claims update is skipped with a warning (`EventId 14406`) and the rotated tokens are stored normally. The signature is not re-validated: the token arrived over the BFF's own client-authenticated TLS channel to the token endpoint, the same trust that accepts the rotated access token.
+
+Note the propagation boundary: the update lands in the cookie ticket via `SignInAsync`, so **subsequent** requests see the new claims. The request that triggered the refresh keeps its already-populated `HttpContext.User` / `AuthContext` for the remainder of its pipeline.
 
 ```csharp
 // Nothing to enable - this just works for BearerToken / TokenExchange backends:

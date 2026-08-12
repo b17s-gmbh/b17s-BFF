@@ -203,16 +203,20 @@ public sealed class RawForwardEndpointBuilder<TTransformer> : BffEndpointBuilder
         var enforceUserIdentity = _requireAuth
             ?? (transformerRequiresAuthAtBuild || _options.RequireAuthorizationByDefault);
         var authPolicyName = _authPolicy;
+        var optionalUserIdentity = _optionalUserIdentity;
 
         // A backend policy that forwards the user's identity must not be paired with anonymous
-        // access: enforceUserIdentity would be false, skipping the auth gate below while the
+        // access unless it is explicitly optional on an AllowAnonymousWithOptionalAuth() endpoint:
+        // otherwise enforceUserIdentity would be false, skipping the auth gate below while the
         // user-token-dependent backend policy stays attached. Catch this at startup the same way
         // the typed endpoint builder does (EndpointAuthorizationValidator.Validate).
         EndpointAuthorizationValidator.ValidateSingleBackend(
             _routePattern,
             _backendAuthPolicy,
             enforceUserIdentity,
-            typeof(TTransformer));
+            typeof(TTransformer),
+            optionalUserIdentity,
+            _backendAuthOptional);
 
         var handler = async (HttpContext context) =>
         {
@@ -268,9 +272,34 @@ public sealed class RawForwardEndpointBuilder<TTransformer> : BffEndpointBuilder
 
             try
             {
-                // Get authentication context (records the bff.authentication span + bff.auth.* metrics)
-                var authContext = await AuthInstrumentation.ResolveAsync(
-                    authProvider, context, allowOptional: !enforceUserIdentity, metrics, enableTelemetry);
+                // Three-rung auth ladder (matching the typed endpoint builder). RequireAuth:
+                // required resolution. AllowAnonymousWithOptionalAuth: optional resolution -
+                // present credentials populate the context, anonymous hits are deliberate.
+                // AllowAnonymous (explicitly or by default): credential-blind - the provider is
+                // never consulted and the transformer always sees an empty AuthContext.
+                // (Resolution records the bff.authentication span + bff.auth.* metrics.)
+                var authContext = enforceUserIdentity || optionalUserIdentity
+                    ? await AuthInstrumentation.ResolveAsync(
+                        authProvider, context, allowOptional: !enforceUserIdentity, metrics, enableTelemetry)
+                    : AuthenticationContext.Unauthenticated();
+
+                // AllowAnonymousWithOptionalAuth(policy): the authenticated treatment is gated on
+                // the policy. A credentialed caller that fails it is served the anonymous view
+                // (never a 403 - anonymous access is allowed anyway).
+                if (optionalUserIdentity && authContext.IsAuthenticated && !string.IsNullOrEmpty(authPolicyName))
+                {
+                    var authorizationService = context.RequestServices.GetRequiredService<IAuthorizationService>();
+                    var policyResult = await authorizationService.AuthorizeAsync(context.User, resource: null, authPolicyName);
+                    if (!policyResult.Succeeded)
+                    {
+                        authContext = AuthenticationContext.Unauthenticated();
+                    }
+                }
+
+                // Optional-flagged user-identity backend auth is applied only for authenticated
+                // callers; anonymous callers reach the backend with no auth. Mandatory identity
+                // policies cannot reach this point on an optional endpoint - startup rejects them.
+                var anonymousCaller = optionalUserIdentity && !authContext.IsAuthenticated;
 
                 // Build transformer context
                 var transformerContext = new TransformerContext
@@ -314,7 +343,9 @@ public sealed class RawForwardEndpointBuilder<TTransformer> : BffEndpointBuilder
                     Url = interpolatedUrl,
                     AccessToken = authContext.AccessToken,
                     Timeout = timeout,
-                    BackendAuthPolicy = backendAuthPolicy
+                    BackendAuthPolicy = anonymousCaller && BackendAuthPolicies.RequiresUserIdentity(backendAuthPolicy)
+                        ? BackendAuthPolicies.None
+                        : backendAuthPolicy
                 };
 
                 // Call backend with raw streaming. NOTE: the request (upload) direction is streamed
