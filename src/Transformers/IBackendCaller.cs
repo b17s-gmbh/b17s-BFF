@@ -517,6 +517,23 @@ public static class BackendAuthPolicies
     public const string BasicAuth = "BasicAuth";
 
     /// <summary>
+    /// Fixed API key configured via <see cref="Configuration.BackendServiceOptions"/>. Sent as
+    /// <c>Authorization: Bearer &lt;token&gt;</c> by default; the scheme is configurable, or the
+    /// key can be sent raw in a custom header (e.g. <c>X-Api-Key</c>). Like <see cref="BasicAuth"/>,
+    /// this is the BFF's own credential - it never carries the caller's identity.
+    /// </summary>
+    public const string ApiKey = "ApiKey";
+
+    /// <summary>
+    /// OAuth2 client-credentials grant (RFC 6749 §4.4): the BFF mints an access token for its
+    /// OWN machine-to-machine identity (configured under <c>BackendService:ClientCredentials</c>,
+    /// deliberately separate from the login client) and sends it as a Bearer credential. Tokens
+    /// are cached process-wide until shortly before expiry. Like <see cref="BasicAuth"/> and
+    /// <see cref="ApiKey"/>, this never carries the caller's identity.
+    /// </summary>
+    public const string ClientCredentials = "ClientCredentials";
+
+    /// <summary>
     /// Forward the user's Bearer token to the backend.
     /// </summary>
     public const string BearerToken = "BearerToken";
@@ -684,6 +701,14 @@ public record NamedBackendEndpoint
     public bool ForwardUserToken { get; init; }
 
     /// <summary>
+    /// Whether this leg's user-identity auth is optional: applied only when the caller
+    /// authenticated, skipped (no auth) when anonymous. Only valid on endpoints marked
+    /// <c>AllowAnonymousWithOptionalAuth()</c> and only with a user-identity policy - the
+    /// startup validator rejects every other placement.
+    /// </summary>
+    public bool OptionalAuth { get; init; }
+
+    /// <summary>
     /// Whether to enable automatic retries for transient failures.
     /// Default: false (retries are disabled by default)
     /// </summary>
@@ -810,8 +835,13 @@ public sealed class NamedBackendEndpointsBuilder
     public NamedBackendEndpointsBuilder ToBackend(string method, string name, string url) => Add(name, method, url);
 
     /// <summary>Sets the backend authentication policy on the most recently added backend.</summary>
-    public NamedBackendEndpointsBuilder WithAuth(string authPolicy)
-        => Mutate(e => e with { BackendAuthPolicy = authPolicy });
+    /// <param name="authPolicy">The backend authentication policy name.</param>
+    /// <param name="optional">
+    /// When true, the policy is applied only for callers that authenticated (requires a
+    /// user-identity policy and an <c>AllowAnonymousWithOptionalAuth()</c> endpoint).
+    /// </param>
+    public NamedBackendEndpointsBuilder WithAuth(string authPolicy, bool optional = false)
+        => Mutate(e => e with { BackendAuthPolicy = authPolicy, OptionalAuth = optional });
 
     /// <summary>
     /// Forwards the user's OAuth token directly to the most recently added backend (sets <c>BearerToken</c>).
@@ -822,19 +852,25 @@ public sealed class NamedBackendEndpointsBuilder
     /// destination host must be listed in <c>PortaCore:TrustedHosts</c> (see
     /// <see cref="Configuration.PortaCoreOptions.TrustedHosts"/>).
     /// </remarks>
-    public NamedBackendEndpointsBuilder WithUserToken()
-        => Mutate(e => e with { BackendAuthPolicy = BackendAuthPolicies.BearerToken, ForwardUserToken = true });
+    public NamedBackendEndpointsBuilder WithUserToken(bool optional = false)
+        => Mutate(e => e with { BackendAuthPolicy = BackendAuthPolicies.BearerToken, ForwardUserToken = true, OptionalAuth = optional });
 
     /// <summary>Uses token exchange for the most recently added backend, scoped to the given audience.</summary>
+    /// <param name="audience">Target audience for the exchanged token. Must be non-empty.</param>
+    /// <param name="optional">
+    /// When true, the exchange runs only for callers that authenticated (requires an
+    /// <c>AllowAnonymousWithOptionalAuth()</c> endpoint).
+    /// </param>
     /// <exception cref="ArgumentException">Thrown when <paramref name="audience"/> is null or blank.</exception>
-    public NamedBackendEndpointsBuilder WithTokenExchange(string audience)
+    public NamedBackendEndpointsBuilder WithTokenExchange(string audience, bool optional = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(audience);
         return Mutate(e => e with
         {
             BackendAuthPolicy = BackendAuthPolicies.TokenExchange,
             UseTokenExchange = true,
-            TokenExchangeAudience = audience
+            TokenExchangeAudience = audience,
+            OptionalAuth = optional
         });
     }
 
@@ -1150,4 +1186,30 @@ public sealed class NamedBackendEndpoints
     /// Gets the count of configured endpoints.
     /// </summary>
     public int Count => _endpoints.Count;
+
+    /// <summary>
+    /// Returns a copy in which every leg with <see cref="NamedBackendEndpoint.OptionalAuth"/> is
+    /// downgraded to <see cref="BackendAuthPolicies.None"/>. Used by optional-auth endpoints
+    /// (<c>AllowAnonymousWithOptionalAuth()</c>) for anonymous callers, who have no token to
+    /// forward or exchange. Non-optional legs are shared unchanged - the startup validator
+    /// guarantees no mandatory user-identity leg exists on an optional-auth endpoint.
+    /// </summary>
+    internal NamedBackendEndpoints WithoutOptionalAuth()
+    {
+        var copy = new NamedBackendEndpoints();
+        foreach (var endpoint in _endpoints.Values)
+        {
+            copy.Add(endpoint.OptionalAuth
+                ? endpoint with
+                {
+                    BackendAuthPolicy = BackendAuthPolicies.None,
+                    UseTokenExchange = false,
+                    ForwardUserToken = false,
+                    TokenExchangeAudience = null,
+                    OptionalAuth = false
+                }
+                : endpoint);
+        }
+        return copy;
+    }
 }

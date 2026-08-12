@@ -144,29 +144,20 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
         return Self;
     }
 
-    /// <summary>
-    /// Allows anonymous access but still attempts to populate authentication context if credentials are present.
-    /// </summary>
-    /// <remarks>
-    /// Equivalent to <see cref="BffEndpointBuilderBase{TBuilder}.AllowAnonymous"/>: every endpoint
-    /// that does not require authentication resolves the auth context optionally, so present
-    /// credentials still populate <see cref="TransformerContext.AuthContext"/>.
-    /// </remarks>
-    public TBuilder AllowAnonymousWithOptionalAuth()
-    {
-        _requireAuth = false;
-        _authPolicy = null;
-        return Self;
-    }
-
     /// <summary>Uses token exchange to get a backend-specific token.</summary>
     /// <param name="audience">Target audience for the exchanged token. Must be non-empty.</param>
+    /// <param name="optional">
+    /// When true, the exchange runs only for callers that authenticated; anonymous callers hit the
+    /// backend with no auth. Only valid on an endpoint marked
+    /// <c>AllowAnonymousWithOptionalAuth()</c> - any other placement fails at startup.
+    /// </param>
     /// <exception cref="ArgumentException">Thrown when <paramref name="audience"/> is null or blank.</exception>
-    public TBuilder WithTokenExchange(string audience)
+    public TBuilder WithTokenExchange(string audience, bool optional = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(audience);
         _useTokenExchange = true;
         _tokenExchangeAudience = audience;
+        _backendAuthOptional = optional;
         return Self;
     }
 
@@ -299,7 +290,12 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
                 && endpoint != null
                 && string.IsNullOrEmpty(endpoint.BackendAuthPolicy))
             {
-                _namedBackends.Add(endpoint with { BackendAuthPolicy = _backendAuthPolicy });
+                // The optional flag travels with the policy it was declared on.
+                _namedBackends.Add(endpoint with
+                {
+                    BackendAuthPolicy = _backendAuthPolicy,
+                    OptionalAuth = _backendAuthOptional
+                });
             }
         }
     }
@@ -398,6 +394,13 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
 
         // Capture values for closure
         var namedBackends = _namedBackends;
+        var optionalUserIdentity = _optionalUserIdentity;
+        // Precomputed once: the named-backend set an anonymous caller sees on an optional-auth
+        // endpoint, with optional-flagged legs downgraded to None - there is no token to forward
+        // or exchange for such a caller.
+        var anonymousNamedBackends = optionalUserIdentity && _namedBackends.Count > 0
+            ? _namedBackends.WithoutOptionalAuth()
+            : _namedBackends;
         var enableRetries = _enableRetries;
         var maxRetryAttempts = _maxRetryAttempts;
         var enableTelemetry = _options.EnableTelemetry;
@@ -466,12 +469,38 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
 
             try
             {
-                // Optional resolution whenever the endpoint doesn't enforce identity (matching
-                // RawForwardEndpointBuilder): an anonymous hit on an AllowAnonymous endpoint is
-                // deliberate - not an auth failure to count - and a throwing provider degrades
-                // to anonymous instead of failing the request with a 500.
-                var authContext = await AuthInstrumentation.ResolveAsync(
-                    authProvider, context, allowOptional: !enforceUserIdentity, metrics, enableTelemetry);
+                // Three-rung auth ladder. RequireAuth: required resolution (unauthenticated counts
+                // as a failure). AllowAnonymousWithOptionalAuth: optional resolution - present
+                // credentials populate the context, an anonymous hit is deliberate and a throwing
+                // provider degrades to anonymous instead of a 500. AllowAnonymous (explicitly or by
+                // default): credential-blind - the provider is never consulted and the transformer
+                // always sees an empty AuthContext.
+                var authContext = enforceUserIdentity || optionalUserIdentity
+                    ? await AuthInstrumentation.ResolveAsync(
+                        authProvider, context, allowOptional: !enforceUserIdentity, metrics, enableTelemetry)
+                    : AuthenticationContext.Unauthenticated();
+
+                // Optional-auth endpoints apply optional-flagged backend auth for authenticated
+                // callers and downgrade it for anonymous ones: there is no token to forward
+                // (BearerToken would warn-and-skip) or exchange (TokenExchange would fail the
+                // request), so the backend leg falls back to None. Mandatory user-identity backend
+                // auth cannot reach this point on an optional endpoint - startup rejects it.
+                var anonymousCaller = optionalUserIdentity && !authContext.IsAuthenticated;
+
+                // AllowAnonymousWithOptionalAuth(policy): the authenticated treatment is gated on
+                // the policy. A credentialed caller that fails it is served the anonymous view
+                // (never a 403 - anonymous access is allowed anyway, so a failing credential can
+                // only remove privilege, not add an error).
+                if (optionalUserIdentity && !anonymousCaller && !string.IsNullOrEmpty(authPolicyName))
+                {
+                    var authorizationService = context.RequestServices.GetRequiredService<IAuthorizationService>();
+                    var policyResult = await authorizationService.AuthorizeAsync(context.User, resource: null, authPolicyName);
+                    if (!policyResult.Succeeded)
+                    {
+                        authContext = AuthenticationContext.Unauthenticated();
+                        anonymousCaller = true;
+                    }
+                }
 
                 var transformerContext = new TransformerContext
                 {
@@ -517,9 +546,11 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
                             interpolatedUrl),
                         AccessToken = authContext.AccessToken,
                         Timeout = timeout,
-                        UseTokenExchange = useTokenExchange,
+                        UseTokenExchange = useTokenExchange && !anonymousCaller,
                         TokenExchangeAudience = tokenExchangeAudience,
-                        BackendAuthPolicy = backendAuthPolicy,
+                        BackendAuthPolicy = anonymousCaller && BackendAuthPolicies.RequiresUserIdentity(backendAuthPolicy)
+                            ? BackendAuthPolicies.None
+                            : backendAuthPolicy,
                         EnableRetries = enableRetries,
                         MaxRetryAttempts = maxRetryAttempts,
                         RequestContentType = backendRequestContentType ?? ContentType.Json
@@ -528,7 +559,9 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
 
                 if (hasNamedBackends)
                 {
-                    transformerContext.Properties["NamedBackends"] = namedBackends;
+                    transformerContext.Properties["NamedBackends"] = anonymousCaller
+                        ? anonymousNamedBackends
+                        : namedBackends;
                 }
 
                 var response = await InvokeTransformerAsync(context, transformerContext);
@@ -698,7 +731,9 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
             _namedBackends,
             GetEffectiveRequireAuth(),
             _services.GetService<IBackendAuthHandlerRegistry>(),
-            typeof(TTransformer));
+            typeof(TTransformer),
+            _optionalUserIdentity,
+            _backendAuthOptional);
 
     // Enforce PortaCore:TrustedHosts for EVERY backend that forwards a user-derived token, not just
     // WithUserToken(). A BearerToken/TokenExchange policy (whether set per-backend or applied as the
@@ -754,10 +789,20 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
                 "multi-backend legs; set BackendRequest.Headers inside the transformer instead.");
         }
 
+        // ApiKey sets Authorization only when its global options don't redirect the key to a
+        // custom header (single-backend requests carry no BackendName, so the global default is
+        // the config that applies at request time).
+        var apiKeySetsAuthorization =
+            _backendAuthPolicy is BackendAuthPolicies.ApiKey
+            && string.IsNullOrEmpty(
+                (_services.GetService<IOptions<BackendServiceOptions>>()?.Value ?? new BackendServiceOptions())
+                    .ApiKey.HeaderName);
         var policySetsAuthorization =
             _useTokenExchange
+            || apiKeySetsAuthorization
             || _backendAuthPolicy is BackendAuthPolicies.BasicAuth
                 or BackendAuthPolicies.BearerToken
+                or BackendAuthPolicies.ClientCredentials
                 or BackendAuthPolicies.TokenExchange;
         if (policySetsAuthorization && _forwardedRequestHeaders.Contains("Authorization"))
         {
@@ -818,6 +863,19 @@ public abstract class TransformerEndpointBuilderBase<TTransformer, TBuilder> : B
             }
 
             hasCacheableLeg = true;
+
+            // Optional-auth endpoints admit anonymous callers, who have no subject to partition a
+            // per-user cache by - the request-time guard would fail every anonymous hit with a 500.
+            // Reject the combination at boot instead.
+            if (_optionalUserIdentity && config.Cache.VaryByUser)
+            {
+                throw new InvalidOperationException(
+                    $"Transformer '{typeof(TTransformer).Name}' caches backend leg '{config.Name}' with " +
+                    "varyByUser: true, but the endpoint uses AllowAnonymousWithOptionalAuth(). Anonymous " +
+                    "callers have no user to partition the cache by, so every anonymous request would fail. " +
+                    "Use RequireAuth(), remove varyByUser, or drop caching for this leg.");
+            }
+
             if (_namedBackends.TryGet(config.Name, out var endpoint) && endpoint is not null)
             {
                 BackendCacheValidation.ValidateLegConfiguration(config, endpoint, typeof(TTransformer).Name);

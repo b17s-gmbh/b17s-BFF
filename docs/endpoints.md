@@ -268,24 +268,51 @@ app.MapTransformer<AdminTransformer, Response>()
     .RequireAuth("AdminPolicy")
     .Build();
 
-// Allow anonymous access
+// Allow anonymous access - credential-blind: the transformer always sees an empty AuthContext,
+// even when the caller sent valid credentials
 app.MapTransformer<PublicTransformer, Response>()
     .FromGet("/api/public")
     .ToGet("https://backend.internal/public")
     .AllowAnonymous()
     .Build();
 
-// Anonymous with optional auth - populate auth context if available
+// Anonymous with optional auth - credentials are resolved when present and, because the backend
+// policy is marked optional, converted into backend auth for authenticated callers only
 app.MapTransformer<ProductTransformer, ProductResponse>()
     .FromGet("/api/products/{id}")
     .ToGet("https://backend.internal/products/{id}")
+    .WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)
     .AllowAnonymousWithOptionalAuth()
     .Build();
 ```
 
 ### Optional Authentication
 
-Use `.AllowAnonymousWithOptionalAuth()` for endpoints that work for both authenticated and anonymous users. (`.AllowAnonymous()` behaves identically: any endpoint that does not require authentication resolves the auth context optionally, so present credentials still populate `context.AuthContext` and an anonymous request never throws or counts as an authentication failure.)
+Typed endpoints sit on a three-rung auth ladder:
+
+| | Resolves credentials | Backend auth allowed |
+|---|---|---|
+| `.RequireAuth(policy?)` | Always (401 without) | Any; `optional: true` is rejected (dead config - identity is always present) |
+| `.AllowAnonymousWithOptionalAuth(policy?)` | When present | Non-identity policies, plus user-identity policies **only with `optional: true`** |
+| `.AllowAnonymous()` | Never (credential-blind - `AuthContext` is always empty) | Non-identity policies only (`None`, `BasicAuth`, `ApiKey`, `ClientCredentials`) |
+
+Use `.AllowAnonymousWithOptionalAuth()` for endpoints that work for both authenticated and anonymous users:
+
+- On its own, it resolves the auth context opportunistically: present credentials populate `context.AuthContext`, anonymous requests pass through with an empty one (and never throw or count as an authentication failure). Use this for transformer-level personalization.
+- To also authenticate the **backend** call, mark the backend auth optional: `WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)`, `.WithTokenExchange(audience, optional: true)`, or `.WithUserToken(optional: true)` / `.WithAuth(policy, optional: true)` on a named backend leg. For authenticated callers the BFF converts whatever credential the frontend sent (e.g. a session cookie) into what the backend expects (e.g. a bearer token); anonymous callers reach the backend with no auth. A *mandatory* (non-optional) user-identity policy on an optional-auth endpoint fails at startup - it promises an identity anonymous callers don't have.
+- `.AllowAnonymousWithOptionalAuth("PolicyName")` additionally gates the authenticated treatment on an authorization policy: a credentialed caller that fails the policy is served the anonymous view (empty `AuthContext`, backend auth skipped) rather than a 403 - anonymous access is allowed anyway, so a failing credential only removes privilege. Policy evaluation runs against `HttpContext.User`, so it needs an authentication scheme registered, same as `RequireAuth(policy)`.
+
+Trusted-host validation applies unchanged: a backend that can receive the user's token must be listed in `PortaCore:TrustedHosts`. Per-user caching (`varyByUser: true`) is not supported on optional-auth endpoints - anonymous callers have no subject to partition the cache by, and startup fails with a descriptive error.
+
+```csharp
+// Personalized when signed in, generic otherwise - backend sees the user's token only when present
+app.MapTransformer<ProductTransformer, ProductResponse>()
+    .FromGet("/api/products/{id}")
+    .ToGet("https://backend.internal/products/{id}")
+    .WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)
+    .AllowAnonymousWithOptionalAuth()
+    .Build();
+```
 
 ```csharp
 public class ProductTransformer : TransformerBase<ProductResponse>
@@ -323,10 +350,15 @@ public class ProductTransformer : TransformerBase<ProductResponse>
 
 ## Authorization Validation
 
-If any backend requires user identity but `AllowAnonymous()` is used, the application fails to start:
+The startup validator rejects every auth combination that cannot work, each with a descriptive error:
+
+- A **mandatory** user-identity backend policy (`BearerToken`/`TokenExchange`/`WithUserToken()`) on an endpoint that allows anonymous access — use `RequireAuth()`, or `AllowAnonymousWithOptionalAuth()` with the policy marked `optional: true`:
 
 ```
-InvalidOperationException: Endpoint '/api/data' has backends that require user identity but
-AllowAnonymous() was called. Remove AllowAnonymous() or change backend auth policies.
-Backends requiring identity: ['InternalApi' (policy: BearerToken)]
+InvalidOperationException: Endpoint '/api/data' requires user identity but allows anonymous access.
+Use RequireAuth(), or AllowAnonymousWithOptionalAuth() with the backend auth marked optional
+(e.g. WithBackendAuth(policy, optional: true)) to forward the user's token only when a caller is
+authenticated. Sources requiring identity: ['InternalApi' (policy: BearerToken)]
 ```
+
+- `optional: true` on a `RequireAuth()` endpoint (dead configuration — identity is always present), on an `AllowAnonymous()` endpoint (no optional auth resolution to key off), or on a non-identity policy such as `BasicAuth` (no caller identity to apply). Raw-forward endpoints follow the same ladder and the same rules.

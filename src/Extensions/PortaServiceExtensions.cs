@@ -185,7 +185,12 @@ public static class PortaServiceExtensions
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IBackendAuthHandler, NoneAuthHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IBackendAuthHandler, BearerTokenAuthHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IBackendAuthHandler, BasicAuthHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IBackendAuthHandler, ApiKeyAuthHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IBackendAuthHandler, ClientCredentialsAuthHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IBackendAuthHandler, TokenExchangeAuthHandler>());
+
+        // Process-wide client-credentials token cache backing the ClientCredentials policy.
+        services.TryAddSingleton<IClientCredentialsTokenService, ClientCredentialsTokenService>();
 
         services.TryAddSingleton<IBackendAuthHandlerRegistry>(sp =>
         {
@@ -577,9 +582,9 @@ public static class PortaServiceExtensions
     /// <returns>The service collection for chaining</returns>
     /// <example>
     /// <code>
-    /// builder.Services.AddPortaAuthHandler&lt;ApiKeyAuthHandler&gt;(sp =>
-    ///     new ApiKeyAuthHandler(
-    ///         sp.GetRequiredService&lt;IConfiguration&gt;()["ApiKeys:PartnerApi"]));
+    /// builder.Services.AddPortaAuthHandler&lt;HmacAuthHandler&gt;(sp =>
+    ///     new HmacAuthHandler(
+    ///         sp.GetRequiredService&lt;IConfiguration&gt;()["Hmac:PartnerApiSecret"]));
     /// </code>
     /// </example>
     public static IServiceCollection AddPortaAuthHandler<THandler>(
@@ -608,7 +613,7 @@ public static class PortaServiceExtensions
     /// <code>
     /// builder.Services.AddPortaAuthHandlers(
     ///     typeof(HmacAuthHandler),
-    ///     typeof(ApiKeyAuthHandler),
+    ///     typeof(SignedUrlAuthHandler),
     ///     typeof(ClientCredentialsAuthHandler));
     /// </code>
     /// </example>

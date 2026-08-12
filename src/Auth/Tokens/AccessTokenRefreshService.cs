@@ -40,6 +40,7 @@ public sealed class AccessTokenRefreshService : IAccessTokenRefreshService
     private readonly IRefreshLock _refreshLock;
     private readonly PortaMetrics? _metrics;
     private readonly TimeSpan _refreshSkew;
+    private readonly bool _refreshClaimsFromIdToken;
     private readonly TimeProvider _timeProvider;
 
     internal AccessTokenRefreshService(
@@ -61,6 +62,7 @@ public sealed class AccessTokenRefreshService : IAccessTokenRefreshService
         _refreshLock = refreshLock;
         _metrics = metrics;
         _refreshSkew = coreOptions.Value.TokenRefreshSkew;
+        _refreshClaimsFromIdToken = coreOptions.Value.RefreshClaimsFromIdToken;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -282,6 +284,10 @@ public sealed class AccessTokenRefreshService : IAccessTokenRefreshService
 
         var newExpiresAt = _timeProvider.GetUtcNow().AddSeconds(response.ExpiresIn);
 
+        // Captured BEFORE the token update below: the previous id_token is the OIDC Core §12.2
+        // reference the claims update validates the new one against (same iss, same sub).
+        var previousIdToken = properties.GetTokenValue("id_token");
+
         properties.UpdateTokenValue("access_token", response.AccessToken);
         if (!string.IsNullOrEmpty(response.RefreshToken))
         {
@@ -295,10 +301,29 @@ public sealed class AccessTokenRefreshService : IAccessTokenRefreshService
             "expires_at",
             newExpiresAt.ToString("o", CultureInfo.InvariantCulture));
 
+        // When the IdP returned a new id_token, refresh the session's claims from it so claim
+        // changes (roles granted/revoked, ...) propagate without a re-login. A failed update
+        // (unparsable token, iss/sub mismatch) keeps the existing principal and only warns - the
+        // token rotation itself must not be lost over a claims problem.
+        var signInPrincipal = principal;
+        if (_refreshClaimsFromIdToken && !string.IsNullOrEmpty(response.IdToken))
+        {
+            var updated = IdTokenClaimsUpdater.TryBuildUpdatedPrincipal(principal, previousIdToken, response.IdToken);
+            if (updated is not null)
+            {
+                signInPrincipal = updated;
+                _logger.SessionClaimsRefreshedFromIdToken();
+            }
+            else
+            {
+                _logger.SessionClaimsRefreshSkipped();
+            }
+        }
+
         // SignInAsync persists the rotated ticket into the (shared) ticket store under the session's
         // key, so the next request/replica that acquires the lock observes it via ReadCurrentTicketAsync
         // and skips a redundant IdP refresh.
-        await context.SignInAsync(CookieScheme, principal, properties);
+        await context.SignInAsync(CookieScheme, signInPrincipal, properties);
 
         // Keep session metadata's refresh token in sync with the rotated value
         // so that later admin / back-channel logout revokes the *current* token
@@ -427,4 +452,14 @@ internal static partial class AccessTokenRefreshServiceLogging
     [LoggerMessage(EventId = 14403, Level = LogLevel.Error,
         Message = "Unexpected error during access token refresh")]
     public static partial void AccessTokenRefreshError(this ILogger logger, Exception ex);
+
+    [LoggerMessage(EventId = 14405, Level = LogLevel.Debug,
+        Message = "Session claims refreshed from the new id_token returned with the token refresh")]
+    public static partial void SessionClaimsRefreshedFromIdToken(this ILogger logger);
+
+    [LoggerMessage(EventId = 14406, Level = LogLevel.Warning,
+        Message = "Claims refresh skipped: the id_token returned with the token refresh could not be " +
+                  "validated against the session (unparsable, or iss/sub mismatch per OIDC Core 12.2). " +
+                  "The session keeps its previous claims; the rotated tokens were stored normally.")]
+    public static partial void SessionClaimsRefreshSkipped(this ILogger logger);
 }

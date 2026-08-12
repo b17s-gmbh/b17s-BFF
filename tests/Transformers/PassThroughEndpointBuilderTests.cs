@@ -342,14 +342,17 @@ public sealed class PassThroughEndpointBuilderTests
         public async Task AllowAnonymousWithOptionalAuth_Dispatches_WhenUnauthenticated()
         {
             // AllowAnonymousWithOptionalAuth differs from AllowAnonymous() in that an
-            // authenticated user's credentials still flow through. The unauthenticated case
-            // is the easy-to-regress one: it must still dispatch (no 401).
+            // authenticated user's credentials still flow through - here paired with an
+            // optional-flagged backend policy so they also reach the backend. The
+            // unauthenticated case is the easy-to-regress one: it must still dispatch (no 401),
+            // with the optional policy downgraded to None.
             var backend = new MockBackendCaller()
                 .SetupResponse("https://backend.test/x", new EchoResponse { Echoed = "ok" });
             using var bff = await CreateBffAsync(endpoints => endpoints
                 .MapPassThrough<EchoResponse>()
                 .FromGet("/api/x")
                 .ToBackend("GET", "https://backend.test/x")
+                .WithBackendAuth(BackendAuthPolicies.BearerToken, optional: true)
                 .AllowAnonymousWithOptionalAuth()
                 .Build(), backend);
 

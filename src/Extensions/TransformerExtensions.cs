@@ -225,11 +225,16 @@ public sealed class PassThroughEndpointBuilder<TResponse>
     }
 
     /// <summary>
-    /// Allows anonymous access but still populates the auth context if credentials are present.
+    /// Allows anonymous access while still authenticating the backend call when the caller
+    /// presented credentials: a user-identity backend-auth policy (BearerToken / TokenExchange)
+    /// is applied for authenticated callers and downgraded to None for anonymous ones. An optional
+    /// authorization policy gates the authenticated treatment - callers failing it get the
+    /// anonymous view. See
+    /// <see cref="TransformerEndpointBuilderBase{TTransformer, TBuilder}.AllowAnonymousWithOptionalAuth"/>.
     /// </summary>
-    public PassThroughEndpointBuilder<TResponse> AllowAnonymousWithOptionalAuth()
+    public PassThroughEndpointBuilder<TResponse> AllowAnonymousWithOptionalAuth(string? policy = null)
     {
-        _inner.AllowAnonymousWithOptionalAuth();
+        _inner.AllowAnonymousWithOptionalAuth(policy);
         return this;
     }
 
@@ -241,9 +246,14 @@ public sealed class PassThroughEndpointBuilder<TResponse>
     }
 
     /// <summary>Specifies the backend authentication policy.</summary>
-    public PassThroughEndpointBuilder<TResponse> WithBackendAuth(string policy)
+    /// <param name="policy">The backend authentication policy name.</param>
+    /// <param name="optional">
+    /// When true, the policy is applied only for callers that authenticated (requires a
+    /// user-identity policy and an <c>AllowAnonymousWithOptionalAuth()</c> endpoint).
+    /// </param>
+    public PassThroughEndpointBuilder<TResponse> WithBackendAuth(string policy, bool optional = false)
     {
-        _inner.WithBackendAuth(policy);
+        _inner.WithBackendAuth(policy, optional);
         return this;
     }
 
@@ -251,9 +261,13 @@ public sealed class PassThroughEndpointBuilder<TResponse>
     /// Uses RFC 8693 token exchange to obtain a backend-specific token for the given audience.
     /// </summary>
     /// <param name="audience">The target audience for the exchanged token.</param>
-    public PassThroughEndpointBuilder<TResponse> WithTokenExchange(string audience)
+    /// <param name="optional">
+    /// When true, the exchange runs only for callers that authenticated (requires an
+    /// <c>AllowAnonymousWithOptionalAuth()</c> endpoint).
+    /// </param>
+    public PassThroughEndpointBuilder<TResponse> WithTokenExchange(string audience, bool optional = false)
     {
-        _inner.WithTokenExchange(audience);
+        _inner.WithTokenExchange(audience, optional);
         return this;
     }
 

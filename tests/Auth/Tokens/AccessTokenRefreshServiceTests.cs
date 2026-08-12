@@ -349,6 +349,95 @@ public class AccessTokenRefreshServiceTests
         Assert.Equal(0, ctx.RefreshCalls);
     }
 
+    // Claims refresh: a new id_token returned with the refresh response updates the session
+    // principal's claims (per re-asserted type), so IdP-side changes (roles granted/revoked)
+    // propagate without a re-login. Detailed update semantics live in IdTokenClaimsUpdaterTests;
+    // here we pin the wiring: updated principal signed in, opt-out honored, mismatch ignored.
+
+    [Fact]
+    public async Task Refresh_WithNewIdToken_SignsInUpdatedClaims()
+    {
+        using var ctx = new TestContext
+        {
+            AccessToken = "stale-access",
+            RefreshToken = "rt",
+            ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(5),
+            RefreshResult = new TokenExchangeResponse
+            {
+                AccessToken = "new-access",
+                IdToken = UnsignedIdToken(sub: "user-1", role: "editor"),
+                ExpiresIn = 3600,
+                TokenType = "Bearer",
+            },
+        };
+
+        await ctx.Service.GetAccessTokenAsync(ctx.HttpContext);
+
+        Assert.NotNull(ctx.LastSignedInPrincipal);
+        Assert.Equal("editor", ctx.LastSignedInPrincipal!.FindFirst("role")?.Value);
+        Assert.Equal("user-1", ctx.LastSignedInPrincipal.FindFirst("sub")?.Value);
+    }
+
+    [Fact]
+    public async Task Refresh_ClaimsRefreshDisabled_SignsInOriginalPrincipal()
+    {
+        using var ctx = new TestContext(coreOptionsOverride: new PortaCoreOptions { RefreshClaimsFromIdToken = false })
+        {
+            AccessToken = "stale-access",
+            RefreshToken = "rt",
+            ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(5),
+            RefreshResult = new TokenExchangeResponse
+            {
+                AccessToken = "new-access",
+                IdToken = UnsignedIdToken(sub: "user-1", role: "editor"),
+                ExpiresIn = 3600,
+                TokenType = "Bearer",
+            },
+        };
+
+        await ctx.Service.GetAccessTokenAsync(ctx.HttpContext);
+
+        Assert.NotNull(ctx.LastSignedInPrincipal);
+        Assert.Null(ctx.LastSignedInPrincipal!.FindFirst("role"));
+    }
+
+    [Fact]
+    public async Task Refresh_IdTokenForDifferentSubject_KeepsExistingClaims()
+    {
+        // OIDC Core 12.2 guard end-to-end: a refresh id_token for another subject must not
+        // rewrite this session's claims - tokens still rotate normally.
+        using var ctx = new TestContext
+        {
+            AccessToken = "stale-access",
+            RefreshToken = "rt",
+            ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(5),
+            RefreshResult = new TokenExchangeResponse
+            {
+                AccessToken = "new-access",
+                IdToken = UnsignedIdToken(sub: "user-2", role: "admin"),
+                ExpiresIn = 3600,
+                TokenType = "Bearer",
+            },
+        };
+
+        var result = await ctx.Service.GetAccessTokenAsync(ctx.HttpContext);
+
+        Assert.Equal("new-access", result.AccessToken);
+        Assert.NotNull(ctx.LastSignedInPrincipal);
+        Assert.Null(ctx.LastSignedInPrincipal!.FindFirst("role"));
+    }
+
+    /// <summary>Minimal unsigned id_token (alg none) - the updater parses without signature validation.</summary>
+    private static string UnsignedIdToken(string sub, string role)
+    {
+        static string Base64Url(string json) =>
+            Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        var header = Base64Url("""{"alg":"none","typ":"JWT"}""");
+        var payload = Base64Url($$"""{"iss":"https://idp.test","sub":"{{sub}}","role":"{{role}}"}""");
+        return $"{header}.{payload}.";
+    }
+
     // SECURITY.md: session ids are credential-equivalent and the `sub` is PII; neither may
     // reach the refresh-lock key, which is both written into the distributed-cache keyspace
     // and emitted in the lock-timeout log line. The key must be a non-reversible fingerprint.
@@ -632,12 +721,16 @@ public class AccessTokenRefreshServiceTests
         public int SignOutCalls { get; private set; }
         public int ApiTokenInvalidationCalls { get; private set; }
         public AuthenticationProperties? LastSignedInProperties { get; private set; }
+        public ClaimsPrincipal? LastSignedInPrincipal { get; private set; }
         public StubSessionManagementService Sessions { get; }
 
         public AccessTokenRefreshService Service { get; }
         public HttpContext HttpContext { get; }
 
-        public TestContext(IRefreshLock? refreshLockOverride = null, PortaMetrics? metricsOverride = null)
+        public TestContext(
+            IRefreshLock? refreshLockOverride = null,
+            PortaMetrics? metricsOverride = null,
+            PortaCoreOptions? coreOptionsOverride = null)
         {
             var fakeAuth = new FakeAuthenticationService(this);
             var refreshService = new StubTokenRefreshService(this);
@@ -660,7 +753,7 @@ public class AccessTokenRefreshServiceTests
                 apiTokenService,
                 NullLogger<AccessTokenRefreshService>.Instance,
                 refreshLockOverride ?? LockRegistry,
-                Microsoft.Extensions.Options.Options.Create(new PortaCoreOptions()),
+                Microsoft.Extensions.Options.Options.Create(coreOptionsOverride ?? new PortaCoreOptions()),
                 sessionManagement: Sessions,
                 metrics: metrics);
         }
@@ -704,9 +797,10 @@ public class AccessTokenRefreshServiceTests
         }
         public void RecordSignOut() => SignOutCalls++;
         public void RecordApiTokenInvalidation() => ApiTokenInvalidationCalls++;
-        public void RecordSignIn(AuthenticationProperties? properties)
+        public void RecordSignIn(ClaimsPrincipal principal, AuthenticationProperties? properties)
         {
             SignInCalls++;
+            LastSignedInPrincipal = principal;
             LastSignedInProperties = properties;
         }
 
@@ -723,7 +817,7 @@ public class AccessTokenRefreshServiceTests
 
             public Task SignInAsync(HttpContext context, string? scheme, ClaimsPrincipal principal, AuthenticationProperties? properties)
             {
-                ctx.RecordSignIn(properties);
+                ctx.RecordSignIn(principal, properties);
                 return Task.CompletedTask;
             }
 
