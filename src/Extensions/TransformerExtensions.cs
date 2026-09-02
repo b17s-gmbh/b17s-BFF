@@ -230,7 +230,7 @@ public sealed class PassThroughEndpointBuilder<TResponse>
     /// is applied for authenticated callers and downgraded to None for anonymous ones. An optional
     /// authorization policy gates the authenticated treatment - callers failing it get the
     /// anonymous view. See
-    /// <see cref="TransformerEndpointBuilderBase{TTransformer, TBuilder}.AllowAnonymousWithOptionalAuth"/>.
+    /// <see cref="BffEndpointBuilderBase{TBuilder}.AllowAnonymousWithOptionalAuth"/>.
     /// </summary>
     public PassThroughEndpointBuilder<TResponse> AllowAnonymousWithOptionalAuth(string? policy = null)
     {

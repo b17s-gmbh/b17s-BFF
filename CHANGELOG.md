@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-02
+### Updated
+- Nuget dependencies
+- microsoft testing plattform
+
 ## [0.5.0-rc.2] - 2026-08-13
 ### Breaking Change
 - Typed endpoints now sit on a three-rung auth ladder, making `AllowAnonymous()` and `AllowAnonymousWithOptionalAuth()` genuinely distinct (they were behavioral aliases):
